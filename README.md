@@ -29,24 +29,24 @@ servers separately (useful when iterating on just one side), and
 `.claude/skills/recover-stuck-git-pull/` if a `git pull` before any of this
 gets stuck on Windows with a "Deletion of directory ... failed" loop.
 
-**Unrelated to the livery generator** (`liveries/`, this repo's other,
-original project — see the root `README.md`). This folder shares only the
-repo and its git remote with `liveries/`, so that git already gives it the
-same two-machine sync that project uses (see `liveries/CLAUDE.md`, "Setup:
-two machines, one private remote" and "Messages between machines:
-HANDOFF.md") — `git pull` at the start of a session, `git push` at the end,
-the root `HANDOFF.md` for anything the other machine needs to know before
-continuing. Nothing in `flybreak/` is imported by `liveries/livery_creator/`
-or vice versa, its dependencies are pinned separately in its own
-`requirements.txt`, and `liveries/pytest.ini`'s `testpaths = tests`
-keeps the livery CI suite from ever collecting `flybreak/tests`.
+## Setup: two machines, one private remote
+
+This project lives on two machines, coordinated by one single private
+GitHub remote (`https://github.com/juliancalcas/flybreak`) -- split out
+from `forja-de-libreas` (the DCS livery generator this repo used to share
+space with) into its own repo, its own history, its own sync, because it
+is a genuinely unrelated project. `git pull` at the start of a session,
+`git push` at the end. `HANDOFF.md` (create it when there's something the
+other machine needs to know before continuing) is read automatically on
+the next `pull` if `githooks/` is enabled once per machine:
+`git config core.hooksPath githooks`.
 
 ## Architecture: three decoupled layers
 
 ```
-flybreak/engine/    Capa 1 -- Python: the real connectome as a sparse LIF network + WebSocket server
-flybreak/contract/  Capa 2 -- the JSON schema both sides speak, + a mock stream
-flybreak/frontend/  Capa 3 -- a self-contained HTML page (Three.js + HUD)
+engine/    Capa 1 -- Python: the real connectome as a sparse LIF network + WebSocket server
+contract/  Capa 2 -- the JSON schema both sides speak, + a mock stream
+frontend/  Capa 3 -- a self-contained HTML page (Three.js + HUD)
 ```
 
 Decoupled so the simulation and the visualization can be iterated on
@@ -117,8 +117,7 @@ needed.
 ### `frontend/` -- the visualization
 
 `index.html` -- one self-contained page (Three.js from a CDN, everything
-else inline), the same "no build step" convention `liveries/web/movil.html`
-already uses in the other project this repo hosts. Connects to
+else inline), no build step. Connects to
 `ws://<host>:8765` (override with
 `window.FLYBREAK_WS_URL` before the script runs, or open it through any
 static server), renders a wireframe city + the fly, and a HUD (tick,
@@ -127,7 +126,7 @@ state, and the `mood_level` slider -- see below). Open it directly in a
 browser, or serve it:
 
 ```bash
-python -m http.server 8080 --directory flybreak/frontend
+python -m http.server 8080 --directory frontend
 ```
 
 ## The real connectome
@@ -140,7 +139,7 @@ the original project brief named, whose `data/` folder packages the raw
 FlyWire Codex export as plain CSVs. `fetch_connectome.py` downloads just
 the two files needed (`connections.csv.gz`, `classification.csv.gz`, ~50
 MB combined) from that repo directly; never vendored in git, see
-`flybreak/.gitignore`.
+`.gitignore`.
 
 Synapse sign: GABA and glutamate are treated as inhibitory (GABA is the
 fly CNS's primary fast inhibitory transmitter; glutamate acts through
