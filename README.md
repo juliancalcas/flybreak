@@ -13,6 +13,22 @@ disembodied fly with one scalar stimulus and no world to move through.
 See "Where this is headed" below for what that actually requires and the
 smallest first step toward it.
 
+## Quick start
+
+```bash
+pip install -r flybreak/requirements.txt
+python -m flybreak                # fetches the connectome on first run (~50 MB),
+                                   # starts engine + frontend, opens your browser
+```
+
+On Windows, double-clicking `flybreak/run.bat` does the same thing without
+opening a terminal at all. Either way this is one process launching both
+servers in background threads and opening `http://localhost:8080` for you
+-- Ctrl+C in that terminal stops both. See "Architecture" below for the two
+servers separately (useful when iterating on just one side), and
+`.claude/skills/recover-stuck-git-pull/` if a `git pull` before any of this
+gets stuck on Windows with a "Deletion of directory ... failed" loop.
+
 **Unrelated to the livery generator** (`liveries/`, this repo's other,
 original project — see the root `README.md`). This folder shares only the
 repo and its git remote with `liveries/`, so that git already gives it the
@@ -63,7 +79,10 @@ without the real engine, and the engine's contract is enforced by
   `contract/schema_v1.json` before sending it, and listens for control
   messages on the same socket.
 
-Run it:
+Run it standalone (`python -m flybreak`, see "Quick start" above, does
+this and the frontend together in one command -- use this form instead
+when iterating on the engine alone, e.g. against a different frontend or
+a raw WebSocket client):
 
 ```bash
 python -m flybreak.engine.fetch_connectome  # once per machine, ~50 MB, ~10-15s to load after
