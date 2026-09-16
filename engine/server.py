@@ -15,9 +15,9 @@ import numpy as np
 import websockets
 from websockets.asyncio.server import ServerConnection
 
-from flybreak.contract.validator import validate_tick
-from flybreak.engine.mood import MoodController
-from flybreak.engine.network import LIFNetwork, warm_cache
+from contract.validator import validate_tick
+from engine.mood import MoodController
+from engine.network import LIFNetwork, warm_cache
 
 SCHEMA_VERSION = "1.1"
 TICK_HZ = 20

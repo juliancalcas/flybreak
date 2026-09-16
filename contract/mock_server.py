@@ -15,7 +15,7 @@ import random
 import websockets
 from websockets.asyncio.server import ServerConnection
 
-from flybreak.contract.validator import validate_tick
+from contract.validator import validate_tick
 
 TICK_HZ = 20
 DT_MS = 1000.0 / TICK_HZ

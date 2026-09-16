@@ -1,0 +1,37 @@
+#!/bin/sh
+# Installed once per machine: git config core.hooksPath githooks
+#
+# Before pushing, it warns (never blocks -- always exit 0, so a
+# non-interactive push is not left hanging) if the push touches structural
+# files without leaving a HANDOFF.md. It cannot know whether the warning is
+# really needed; it only reminds you the option exists -- see
+# liveries/CLAUDE.md, "Messages between machines".
+#
+# Deliberately project-agnostic (see the root README.md, "Adding a
+# project"): matches any top-level project's own CLAUDE.md and .gitignore,
+# plus the two repo-wide files, rather than naming each project's specific
+# integration points (environment.py, aircraft.json, a JSON schema...) by
+# hand. That trades some precision (a deep integration change with no
+# matching CLAUDE.md edit goes unflagged) for never needing to touch this
+# file again just because a new project was added.
+zero="0000000000000000000000000000000000000000"
+pattern='^([^/]+/)?CLAUDE\.md$|^\.gitignore$|^[^/]+/\.gitignore$|^\.gitattributes$'
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+  [ "$local_sha" = "$zero" ] && continue
+  if [ "$remote_sha" = "$zero" ]; then
+    range="$local_sha"
+  else
+    range="$remote_sha..$local_sha"
+  fi
+  touched=$(git diff --name-only "$range" 2>/dev/null | grep -E "$pattern")
+  if [ -n "$touched" ] && ! git cat-file -e "$local_sha:HANDOFF.md" 2>/dev/null; then
+    echo ""
+    echo "WARNING: this push touches structural files without a HANDOFF.md:"
+    echo "$touched" | sed 's/^/  /'
+    echo "If the other machine needs to know something about this change,"
+    echo "write it in HANDOFF.md before carrying on. If not, ignore this."
+    echo ""
+  fi
+done
+exit 0

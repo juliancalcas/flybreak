@@ -16,12 +16,12 @@ smallest first step toward it.
 ## Quick start
 
 ```bash
-pip install -r flybreak/requirements.txt
-python -m flybreak                # fetches the connectome on first run (~50 MB),
+pip install -r requirements.txt
+python __main__.py                # fetches the connectome on first run (~50 MB),
                                    # starts engine + frontend, opens your browser
 ```
 
-On Windows, double-clicking `flybreak/run.bat` does the same thing without
+On Windows, double-clicking `run.bat` does the same thing without
 opening a terminal at all. Either way this is one process launching both
 servers in background threads and opening `http://localhost:8080` for you
 -- Ctrl+C in that terminal stops both. See "Architecture" below for the two
@@ -38,7 +38,7 @@ HANDOFF.md") — `git pull` at the start of a session, `git push` at the end,
 the root `HANDOFF.md` for anything the other machine needs to know before
 continuing. Nothing in `flybreak/` is imported by `liveries/livery_creator/`
 or vice versa, its dependencies are pinned separately in its own
-`flybreak/requirements.txt`, and `liveries/pytest.ini`'s `testpaths = tests`
+`requirements.txt`, and `liveries/pytest.ini`'s `testpaths = tests`
 keeps the livery CI suite from ever collecting `flybreak/tests`.
 
 ## Architecture: three decoupled layers
@@ -63,7 +63,7 @@ without the real engine, and the engine's contract is enforced by
   (`optic`, `central`, `sensory`, `visual_projection`, `ascending`,
   `descending`, `sensory_ascending`, `visual_centrifugal`, `motor`,
   `endocrine` -- discovered at runtime from the data, not a fixed list).
-  Requires `python -m flybreak.engine.fetch_connectome` to have been run
+  Requires `python -m engine.fetch_connectome` to have been run
   once on this machine first (see "The real connectome" below) -- the
   ~50 MB data is never in git.
 - `mood.py` -- `MoodController`: the hybrid `mood_level` (see "The
@@ -79,14 +79,14 @@ without the real engine, and the engine's contract is enforced by
   `contract/schema_v1.json` before sending it, and listens for control
   messages on the same socket.
 
-Run it standalone (`python -m flybreak`, see "Quick start" above, does
+Run it standalone (`python __main__.py`, see "Quick start" above, does
 this and the frontend together in one command -- use this form instead
 when iterating on the engine alone, e.g. against a different frontend or
 a raw WebSocket client):
 
 ```bash
-python -m flybreak.engine.fetch_connectome  # once per machine, ~50 MB, ~10-15s to load after
-python -m flybreak.engine.server            # ws://127.0.0.1:8765, one Simulation per client
+python -m engine.fetch_connectome  # once per machine, ~50 MB, ~10-15s to load after
+python -m engine.server            # ws://127.0.0.1:8765, one Simulation per client
 ```
 
 ### `contract/` -- the data contract
@@ -106,7 +106,7 @@ python -m flybreak.engine.server            # ws://127.0.0.1:8765, one Simulatio
   discover them from):
 
 ```bash
-python -m flybreak.contract.mock_server  # ws://127.0.0.1:8765, no LIF sim involved
+python -m contract.mock_server  # ws://127.0.0.1:8765, no LIF sim involved
 ```
 
 `motor_state.action` is `idle | walking | grooming | flying | frozen`,

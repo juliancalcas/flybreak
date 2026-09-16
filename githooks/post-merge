@@ -1,0 +1,15 @@
+#!/bin/sh
+# Installed once per machine: git config core.hooksPath githooks
+#
+# Runs only after `git pull`/`git merge`. If the other machine left a
+# HANDOFF.md behind, it prints it on screen so nobody has to remember to
+# look at it -- see CLAUDE.md, "Messages between machines".
+if [ -f HANDOFF.md ]; then
+  echo ""
+  echo "================================================================"
+  echo " HANDOFF.md -- message from the other machine, unresolved"
+  echo "================================================================"
+  cat HANDOFF.md
+  echo "================================================================"
+  echo ""
+fi

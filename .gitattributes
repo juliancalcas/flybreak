@@ -1,0 +1,5 @@
+# Mac and PC in the same repository: without this, each machine rewrites the
+# other's line endings and every `git status` comes out full of false
+# changes. `text=auto` normalises to LF inside the repository and lets each
+# system use its own on disk.
+* text=auto

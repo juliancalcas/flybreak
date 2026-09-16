@@ -1,7 +1,7 @@
 """One-command launcher: fetches the connectome if needed, starts the
 engine and the frontend's static server, opens the browser.
 
-Run from the repo root with: python -m flybreak
+Run from the repo root with: python __main__.py
 Ctrl+C stops both servers.
 """
 from __future__ import annotations
@@ -13,8 +13,8 @@ import webbrowser
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from flybreak.engine import fetch_connectome, network
-from flybreak.engine import server as engine_server
+from engine import fetch_connectome, network
+from engine import server as engine_server
 
 FRONTEND_DIR = Path(__file__).parent / "frontend"
 FRONTEND_PORT = 8080

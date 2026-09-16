@@ -1,6 +1,23 @@
+# Generic, project-wide rules -- this repo used to share these with a
+# sibling project (liveries/) in one monorepo; now standalone, so they live
+# here directly instead of a shared root .gitignore.
+#
+# CAREFUL: in .gitignore a comment at the end of a line is NOT a comment,
+# it is part of the pattern. That is why every note goes on its own line.
+
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.DS_Store
+.env
+.claude/settings.local.json
+
+# interpreter path: different on each machine (Mac vs PC), not shared
+.claude/launch.json
+
 # The real FlyWire connectome data -- ~50 MB, fetched per machine with
-# `python -m flybreak.engine.fetch_connectome`, never committed. Same
-# reasoning as liveries/.gitignore's binaries: too heavy for git, and
-# it's a third-party download with its own provenance, not this
+# `python -m engine.fetch_connectome`, never committed. Too heavy for git,
+# and it's a third-party download with its own provenance, not this
 # project's own work.
 engine/data/

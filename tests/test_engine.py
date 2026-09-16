@@ -1,10 +1,10 @@
 import numpy as np
 import pytest
 
-from flybreak.contract.validator import validate_tick
-from flybreak.engine.mood import MoodController
-from flybreak.engine.network import LIFNetwork, data_available
-from flybreak.engine.server import Simulation
+from contract.validator import validate_tick
+from engine.mood import MoodController
+from engine.network import LIFNetwork, data_available
+from engine.server import Simulation
 
 # LIFNetwork/Simulation load the real ~50 MB FlyWire connectome (see
 # network.py) -- these tests need `python -m flybreak.engine.fetch_connectome`

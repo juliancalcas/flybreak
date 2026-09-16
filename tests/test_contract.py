@@ -1,7 +1,7 @@
 import jsonschema
 import pytest
 
-from flybreak.contract.validator import is_valid_tick, validate_tick
+from contract.validator import is_valid_tick, validate_tick
 
 VALID_TICK = {
     "schema_version": "1.1",
