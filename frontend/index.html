@@ -36,14 +36,15 @@
   .status-connected { background: #5affa0; box-shadow: 0 0 6px #5affa0; }
   .status-disconnected { background: #ff5a5a; box-shadow: 0 0 6px #ff5a5a; }
 
-  #bac-panel { width: 220px; }
-  #bac-slider { width: 100%; accent-color: #ff5a5a; }
-  #bac-mode-btn {
+  #mood-panel { width: 220px; }
+  #mood-slider { width: 100%; accent-color: #ffd35a; }
+  .mood-scale { display: flex; justify-content: space-between; font-size: 10px; opacity: 0.65; margin-top: 2px; }
+  #mood-mode-btn {
     pointer-events: auto; font: inherit; color: inherit; cursor: pointer;
     background: rgba(120,255,170,0.1); border: 1px solid rgba(120,255,170,0.35);
     border-radius: 4px; padding: 3px 8px; margin-top: 6px;
   }
-  #bac-mode-btn:hover { background: rgba(120,255,170,0.2); }
+  #mood-mode-btn:hover { background: rgba(120,255,170,0.2); }
 </style>
 </head>
 <body>
@@ -67,10 +68,11 @@
     </div>
   </div>
 
-  <div class="panel" id="bac-panel">
-    <div class="row"><span class="label">bac_level</span><span id="bac-value">0.00</span></div>
-    <input id="bac-slider" type="range" min="0" max="1" step="0.01" value="0" />
-    <button id="bac-mode-btn" type="button">mode: auto</button>
+  <div class="panel" id="mood-panel">
+    <div class="row"><span class="label">mood_level</span><span id="mood-value">0.00</span></div>
+    <input id="mood-slider" type="range" min="0" max="1" step="0.01" value="0" />
+    <div class="mood-scale"><span>feliz</span><span>muy feliz</span><span>plena</span></div>
+    <button id="mood-mode-btn" type="button">mode: auto</button>
   </div>
 </div>
 
@@ -132,30 +134,32 @@
     // don't fight the user's finger: only sync the slider when they are not
     // actively dragging it.
     if (!draggingSlider) {
-      slider.value = tick.stimulus.bac_level;
+      slider.value = tick.stimulus.mood_level;
     }
-    document.getElementById("bac-value").textContent = tick.stimulus.bac_level.toFixed(2);
+    document.getElementById("mood-value").textContent = tick.stimulus.mood_level.toFixed(2);
 
     applyMotorState(tick.motor_state);
   }
 
-  // ---- bac_level control: hybrid (auto ramp in the engine, manual override here) ----
-  const slider = document.getElementById("bac-slider");
-  const modeBtn = document.getElementById("bac-mode-btn");
+  // ---- mood_level control: hybrid (auto ramp in the engine, manual override
+  // here). One continuous slider, "feliz" (0) to "plena" (1); "muy feliz" is
+  // just its labeled midpoint, not a separate discrete state. ----
+  const slider = document.getElementById("mood-slider");
+  const modeBtn = document.getElementById("mood-mode-btn");
   let draggingSlider = false;
   let mode = "auto";
 
   slider.addEventListener("pointerdown", () => { draggingSlider = true; });
   slider.addEventListener("input", () => {
-    document.getElementById("bac-value").textContent = parseFloat(slider.value).toFixed(2);
-    sendControl({ type: "set_bac_level", value: parseFloat(slider.value) });
+    document.getElementById("mood-value").textContent = parseFloat(slider.value).toFixed(2);
+    sendControl({ type: "set_mood_level", value: parseFloat(slider.value) });
     setMode("manual");
   });
   slider.addEventListener("pointerup", () => { draggingSlider = false; });
 
   modeBtn.addEventListener("click", () => {
     if (mode === "manual") {
-      sendControl({ type: "set_bac_mode", value: "auto" });
+      sendControl({ type: "set_mood_mode", value: "auto" });
       setMode("auto");
     }
   });

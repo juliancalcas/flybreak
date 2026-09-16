@@ -5,6 +5,7 @@
 #     .venv/bin/pip install -r flybreak/requirements.txt
 
 numpy==2.5.2
+scipy==1.17.1
 jsonschema==4.25.1
 websockets==15.0.1
 

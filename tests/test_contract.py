@@ -4,17 +4,17 @@ import pytest
 from flybreak.contract.validator import is_valid_tick, validate_tick
 
 VALID_TICK = {
-    "schema_version": "1.0",
+    "schema_version": "1.1",
     "tick": 4821,
     "sim_time_ms": 300,
-    "stimulus": {"bac_level": 0.20, "other_inputs": {}},
+    "stimulus": {"mood_level": 0.72, "other_inputs": {}},
     "activity": {
         "spike_count": 2069,
         "firing_rate_hz": 311,
         "active_regions": [
-            {"region": "mushroom_body", "activity": 0.72},
-            {"region": "central_complex", "activity": 0.41},
-            {"region": "optic_lobe", "activity": 0.15},
+            {"region": "central", "activity": 0.72},
+            {"region": "descending", "activity": 0.41},
+            {"region": "optic", "activity": 0.15},
         ],
     },
     "motor_state": {"action": "walking", "heading_deg": 187, "speed": 0.3, "wing_state": "folded"},
@@ -34,8 +34,8 @@ def test_missing_field_rejected():
     assert not is_valid_tick(tick)
 
 
-def test_bac_level_out_of_range_rejected():
-    tick = {**VALID_TICK, "stimulus": {"bac_level": 1.5, "other_inputs": {}}}
+def test_mood_level_out_of_range_rejected():
+    tick = {**VALID_TICK, "stimulus": {"mood_level": 1.5, "other_inputs": {}}}
     assert not is_valid_tick(tick)
 
 

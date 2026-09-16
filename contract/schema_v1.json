@@ -6,15 +6,15 @@
   "required": ["schema_version", "tick", "sim_time_ms", "stimulus", "activity", "motor_state", "meta"],
   "additionalProperties": false,
   "properties": {
-    "schema_version": { "const": "1.0" },
+    "schema_version": { "const": "1.1" },
     "tick": { "type": "integer", "minimum": 0 },
     "sim_time_ms": { "type": "number", "minimum": 0 },
     "stimulus": {
       "type": "object",
-      "required": ["bac_level", "other_inputs"],
+      "required": ["mood_level", "other_inputs"],
       "additionalProperties": false,
       "properties": {
-        "bac_level": { "type": "number", "minimum": 0, "maximum": 1 },
+        "mood_level": { "type": "number", "minimum": 0, "maximum": 1 },
         "other_inputs": { "type": "object" }
       }
     },

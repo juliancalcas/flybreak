@@ -1,0 +1,6 @@
+# The real FlyWire connectome data -- ~50 MB, fetched per machine with
+# `python -m flybreak.engine.fetch_connectome`, never committed. Same
+# reasoning as liveries/.gitignore's binaries: too heavy for git, and
+# it's a third-party download with its own provenance, not this
+# project's own work.
+engine/data/

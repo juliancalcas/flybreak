@@ -1,17 +1,23 @@
-"""Hybrid bac_level controller.
+"""Hybrid mood_level controller.
 
-By default the level ramps up automatically with sim time (the fly gets
-progressively drunker). A HUD slider on the frontend can override it at any
-moment; releasing the override resumes the ramp from wherever it was left,
-so letting go of the slider never causes a visible jump. See
-flybreak/README.md, "bac_level: decision".
+By default the level ramps up automatically with sim time (the fly grows
+progressively happier on its own, unprompted). Three HUD preset buttons
+--"feliz", "muy feliz", "plena" (see server.py's MOOD_PRESETS) -- can pin
+it to a fixed value at any moment; releasing the override resumes the
+ramp from wherever it was left, so letting go of a preset never causes a
+visible jump. See flybreak/README.md, "The mood_level stimulus".
+
+This replaced an earlier "ethanol intoxication" (bac_level) stimulus --
+same mechanism (this class is otherwise unchanged from that version),
+opposite direction and meaning: bac_level ramped toward impairment,
+mood_level ramps toward contentment.
 """
 from __future__ import annotations
 
 
-class BacController:
+class MoodController:
     def __init__(self, ramp_per_ms: float = 1.0 / 120_000, start: float = 0.0):
-        # default ramp: reaches 1.0 after ~2 minutes of sim time
+        # default ramp: reaches 1.0 ("plena") after ~2 minutes of sim time
         self._ramp_per_ms = ramp_per_ms
         self._auto_level = start
         self._manual_level: float | None = None
