@@ -1,0 +1,63 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "flybreak/contract/schema_v1.json",
+  "title": "FlyBreak tick",
+  "type": "object",
+  "required": ["schema_version", "tick", "sim_time_ms", "stimulus", "activity", "motor_state", "meta"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "const": "1.0" },
+    "tick": { "type": "integer", "minimum": 0 },
+    "sim_time_ms": { "type": "number", "minimum": 0 },
+    "stimulus": {
+      "type": "object",
+      "required": ["bac_level", "other_inputs"],
+      "additionalProperties": false,
+      "properties": {
+        "bac_level": { "type": "number", "minimum": 0, "maximum": 1 },
+        "other_inputs": { "type": "object" }
+      }
+    },
+    "activity": {
+      "type": "object",
+      "required": ["spike_count", "firing_rate_hz", "active_regions"],
+      "additionalProperties": false,
+      "properties": {
+        "spike_count": { "type": "integer", "minimum": 0 },
+        "firing_rate_hz": { "type": "number", "minimum": 0 },
+        "active_regions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["region", "activity"],
+            "additionalProperties": false,
+            "properties": {
+              "region": { "type": "string", "minLength": 1 },
+              "activity": { "type": "number", "minimum": 0, "maximum": 1 }
+            }
+          }
+        }
+      }
+    },
+    "motor_state": {
+      "type": "object",
+      "required": ["action", "heading_deg", "speed", "wing_state"],
+      "additionalProperties": false,
+      "properties": {
+        "action": { "type": "string", "enum": ["idle", "walking", "grooming", "flying", "frozen"] },
+        "heading_deg": { "type": "number", "minimum": 0, "exclusiveMaximum": 360 },
+        "speed": { "type": "number", "minimum": 0 },
+        "wing_state": { "type": "string", "enum": ["folded", "raised", "buzzing"] }
+      }
+    },
+    "meta": {
+      "type": "object",
+      "required": ["status", "notes"],
+      "additionalProperties": false,
+      "properties": {
+        "status": { "type": "string", "enum": ["decompressing", "running", "paused", "error"] },
+        "notes": { "type": "string" }
+      }
+    }
+  }
+}
