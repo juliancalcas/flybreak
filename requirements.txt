@@ -1,0 +1,14 @@
+# FlyBreak — its own dependencies, kept separate from liveries/requirements.txt
+# on purpose: this is an unrelated project sharing this repo/venv only for
+# the git sync between the two machines (see flybreak/README.md and the
+# root README.md). Install with:
+#     .venv/bin/pip install -r flybreak/requirements.txt
+
+numpy==2.5.2
+jsonschema==4.25.1
+websockets==15.0.1
+
+# development -- flybreak/tests is not wired into the liveries CI job
+# (pytest.ini's testpaths lives inside liveries/), run it explicitly:
+#     python -m pytest flybreak/tests -q
+pytest==9.1.1

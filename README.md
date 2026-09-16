@@ -4,14 +4,16 @@ Simulates the FlyWire connectome of *Drosophila* under an artificial
 "ethanol intoxication" (BAC) stimulus, visualized in 3D: a fly over a
 wireframe city, with a live HUD of the simulation's metrics.
 
-**Unrelated to the livery generator.** This folder shares the repo (and the
-`.venv`/`requirements.txt`) with `livery_creator/` only so that git already
-gives it the same two-machine sync this project uses (see the root
-`CLAUDE.md`, "Setup: two machines, one private remote" and "Messages
-between machines: HANDOFF.md") — `git pull` at the start of a session,
-`git push` at the end, `HANDOFF.md` for anything the other machine needs to
-know before continuing. Nothing in `flybreak/` is imported by
-`livery_creator/` or vice versa, and `pytest.ini`'s `testpaths = tests`
+**Unrelated to the livery generator** (`liveries/`, this repo's other,
+original project — see the root `README.md`). This folder shares only the
+repo and its git remote with `liveries/`, so that git already gives it the
+same two-machine sync that project uses (see `liveries/CLAUDE.md`, "Setup:
+two machines, one private remote" and "Messages between machines:
+HANDOFF.md") — `git pull` at the start of a session, `git push` at the end,
+the root `HANDOFF.md` for anything the other machine needs to know before
+continuing. Nothing in `flybreak/` is imported by `liveries/livery_creator/`
+or vice versa, its dependencies are pinned separately in its own
+`flybreak/requirements.txt`, and `liveries/pytest.ini`'s `testpaths = tests`
 keeps the livery CI suite from ever collecting `flybreak/tests`.
 
 ## Architecture: three decoupled layers
@@ -73,8 +75,9 @@ needed.
 ### `frontend/` -- the visualization
 
 `index.html` -- one self-contained page (Three.js from a CDN, everything
-else inline), the same "no build step" convention `web/movil.html` already
-uses in this repo. Connects to `ws://<host>:8765` (override with
+else inline), the same "no build step" convention `liveries/web/movil.html`
+already uses in the other project this repo hosts. Connects to
+`ws://<host>:8765` (override with
 `window.FLYBREAK_WS_URL` before the script runs, or open it through any
 static server), renders a wireframe city + the fly, and a HUD (tick,
 sim_time, spike count, firing rate, per-region activity bars, action, wing
