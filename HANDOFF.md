@@ -18,11 +18,19 @@ repo root, 7 passed, 4 skipped (the 4 need the real connectome data, not
 fetched on a fresh checkout until `fetch_connectome` runs).
 
 **Immediate local task:** set up a working checkout at
-`C:\Users\Julian\Documents\Claude\Main\FLY`. From a terminal there:
+`C:\Users\Julian\Documents\Claude\Main\Fly\flybreak` -- corrected from an
+earlier `Main\FLY` path floated before the local (DCS) session and the
+user settled the actual folder shape directly: `Main\DCS\...` for the
+livery repo, `Main\Fly\flybreak\` for this one, sibling categories under
+`Main\`. If a checkout already exists at `Main\FLY` or anywhere else,
+either `git remote add origin https://github.com/juliancalcas/flybreak`
+inside it (if it isn't already pointed there) and `git pull`, or start
+fresh at the path below -- don't create a second GitHub repo either way,
+there's only the one. From a terminal:
 
 ```
-git clone https://github.com/juliancalcas/flybreak "C:\Users\Julian\Documents\Claude\Main\FLY"
-cd "C:\Users\Julian\Documents\Claude\Main\FLY"
+git clone https://github.com/juliancalcas/flybreak "C:\Users\Julian\Documents\Claude\Main\Fly\flybreak"
+cd "C:\Users\Julian\Documents\Claude\Main\Fly\flybreak"
 git config core.hooksPath githooks
 pip install -r requirements.txt
 python -m engine.fetch_connectome   # once, ~50 MB
