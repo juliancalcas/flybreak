@@ -40,14 +40,23 @@ def _mock_tick(tick: int, sim_time_ms: float, mood_level: float) -> dict:
     motor_activity = active_regions[-1]["activity"]
     action = "flying" if motor_activity > 0.7 else "walking" if motor_activity > 0.4 else "idle"
     # plausible stand-in for the real engine's food_mask EMA (see
-    # server.py's _FOOD_BOOST comment for the measured real range: ~0.25-
-    # 0.29 baseline, ~0.62-0.65 with the static food boost applied) --
-    # oscillates across roughly that same span so a frontend built
-    # against the mock sees a realistic value before ever touching the
-    # real engine.
+    # server.py's _FOOD_RANGE comment for the measured real range: ~0.22-
+    # 0.24 far from food, ~0.63-0.67 at/near FOOD_POSITION under the
+    # distance gradient) -- oscillates across roughly that same span so a
+    # frontend built against the mock sees a realistic value before ever
+    # touching the real engine.
     food_activity = 0.3 + 0.35 * ((math.sin(t * 0.3 + 3.0) + 1) / 2)
+    # plausible stand-in for the real engine's now-authoritative
+    # (self._x, self._z) (see server.py's FOOD_POSITION/_POSITION_STEP
+    # comments) -- the mock has no LIF network or chemotaxis steering to
+    # actually walk the fly toward FOOD_POSITION (6, 5), so it just drifts
+    # in a slow circle around the origin, big enough (radius 5, close to
+    # the real food distance of ~7.8) to look like real wandering to a
+    # frontend built against this mock, without pretending to model
+    # anything.
+    position = {"x": math.cos(t * 0.05) * 5.0, "z": math.sin(t * 0.05) * 5.0}
     return {
-        "schema_version": "1.2",
+        "schema_version": "1.3",
         "tick": tick,
         "sim_time_ms": sim_time_ms,
         "stimulus": {"mood_level": mood_level, "other_inputs": {}},
@@ -62,6 +71,7 @@ def _mock_tick(tick: int, sim_time_ms: float, mood_level: float) -> dict:
             "heading_deg": (t * 20) % 360,
             "speed": motor_activity,
             "wing_state": "buzzing" if action == "flying" else "folded",
+            "position": position,
         },
         "meta": {"status": "running", "notes": "mock stream"},
     }

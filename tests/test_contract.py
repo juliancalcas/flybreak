@@ -4,7 +4,7 @@ import pytest
 from contract.validator import is_valid_tick, validate_tick
 
 VALID_TICK = {
-    "schema_version": "1.2",
+    "schema_version": "1.3",
     "tick": 4821,
     "sim_time_ms": 300,
     "stimulus": {"mood_level": 0.72, "other_inputs": {}},
@@ -18,7 +18,10 @@ VALID_TICK = {
         ],
         "food_activity": 0.63,
     },
-    "motor_state": {"action": "walking", "heading_deg": 187, "speed": 0.3, "wing_state": "folded"},
+    "motor_state": {
+        "action": "walking", "heading_deg": 187, "speed": 0.3, "wing_state": "folded",
+        "position": {"x": 3.4, "z": 2.1},
+    },
     "meta": {"status": "decompressing", "notes": ""},
 }
 
@@ -48,6 +51,12 @@ def test_food_activity_out_of_range_rejected():
 def test_food_activity_missing_rejected():
     activity = {k: v for k, v in VALID_TICK["activity"].items() if k != "food_activity"}
     tick = {**VALID_TICK, "activity": activity}
+    assert not is_valid_tick(tick)
+
+
+def test_position_missing_rejected():
+    motor_state = {k: v for k, v in VALID_TICK["motor_state"].items() if k != "position"}
+    tick = {**VALID_TICK, "motor_state": motor_state}
     assert not is_valid_tick(tick)
 
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 
 import numpy as np
 import websockets
@@ -19,7 +20,7 @@ from contract.validator import validate_tick
 from engine.mood import MoodController
 from engine.network import LIFNetwork, warm_cache
 
-SCHEMA_VERSION = "1.2"
+SCHEMA_VERSION = "1.3"
 TICK_HZ = 20
 DT_MS = 1000.0 / TICK_HZ
 
@@ -41,28 +42,101 @@ _MOTOR_ACTIVITY_MIN = 0.30
 _MOTOR_ACTIVITY_MAX = 0.60
 _MOTOR_EMA_ALPHA = 0.1
 
-# The "food is present" static stimulus (see README.md, "Where this is
-# headed" -- the smallest real sensory-input step, replacing part of the
-# flat noise `drive` with a real, always-on boost to a real, identity-
-# labeled taste population instead of exciting everything uniformly).
-# net.food_mask is FlyWire's `class == "gustatory"`, `sub_class ==
-# "sugar/water"` (129 neurons) -- see network.py's FOOD_CLASS/
-# FOOD_SUB_CLASS comment for why this replaces the earlier, fabricated
-# `OLF_ORN_FOOD` olfactory label, which did not actually exist in the
-# real data.
+# The "food is present" stimulus (see README.md, "Where this is headed"
+# -- the smallest real sensory-input step, replacing part of the flat
+# noise `drive` with a real boost to a real, identity-labeled taste
+# population instead of exciting everything uniformly). net.food_mask is
+# FlyWire's `class == "gustatory"`, `sub_class == "sugar/water"` (129
+# neurons) -- see network.py's FOOD_CLASS/FOOD_SUB_CLASS comment for why
+# this replaces the earlier, fabricated `OLF_ORN_FOOD` olfactory label,
+# which did not actually exist in the real data.
 #
-# Empirically measured on the real connectome (500-tick runs, seed 0,
-# first 80 ticks dropped as warm-up, at mood_level 0.0/0.5/1.0): with no
-# boost, food_mask's per-tick spike fraction sits at ~0.25-0.29 regardless
-# of mood_level (mood_level's own effect on it is small, a ~0.03 shift --
-# it is not a food signal). A static +_FOOD_BOOST added only to
-# food_mask's drive raises that to ~0.62-0.65, a clear, mood_level-
-# independent step up from baseline; tick-to-tick noise (std ~0.08-0.09)
-# is smoothed with the same EMA pattern as the motor pathway before this
-# is reported, so the two effects (baseline mood_level noise vs. food
-# presence) stay visually distinguishable downstream.
+# FOOD_POSITION is the one fixed food source in the (as-yet wall-less,
+# single-fly) world -- (x, z) on the same ground plane the fly's own
+# (self._x, self._z) live on. It must match frontend/index.html's food
+# prop exactly (`food.position.set(6, 1.4, 5)`; the frontend's y=1.4 is
+# just the prop's height off the ground and has no engine-side analog).
+# This constant is the source of truth for that number; the frontend's
+# literal is the one that must be kept in lockstep with it, not the
+# reverse.
+FOOD_POSITION = (6.0, 5.0)  # (x, z)
+
+# _FOOD_BOOST is now the boost's FULL strength, only reached at/very near
+# FOOD_POSITION -- see the proximity scaling below. Real gustatory
+# (taste) sensing in the actual fly is contact-based, not a distance
+# gradient -- that "smell it before touching it" behavior is really an
+# olfactory mechanism, and this codebase has no olfactory-gradient
+# subsystem (see README.md's "OLF_ORN_FOOD does not exist" correction).
+# Ramping the taste channel up with proximity is a modeling
+# simplification, the same kind already made for ACH/DA/SER/OCT-as-
+# excitatory in network.py: the smallest honest step toward "the fly's
+# food-drive grows as it nears food" without inventing a whole separate
+# sensory pathway that would need its own real, identity-labeled neuron
+# population to attach to (this dataset's `class == "olfactory"`
+# sub-populations carry no food identity -- see README.md).
+#
+# _FOOD_RANGE sets the falloff: an exponential (proximity =
+# exp(-distance / _FOOD_RANGE)), chosen over e.g. inverse-square because
+# it has no singularity at distance=0 and decays to "effectively zero"
+# over a bounded, tunable distance rather than a long inverse-square
+# tail. 8.0 is picked to match the actual geometry here: FOOD_POSITION is
+# ~7.8 units from the fly's (0,0) spawn (frontend's `fly.position.set(0,
+# 3, 0)`), so at spawn the fly already senses roughly 1/e (~37%) of full
+# strength -- it hasn't arrived, but it's not scent-blind either -- and
+# by ~3x that distance (~24 units, beyond the nearest ring of city
+# buildings at radius 15+, see frontend/index.html) proximity is under
+# 5%, indistinguishable from no boost at all.
+#
+# Empirically measured (same methodology as the original flat-boost
+# number this replaces: 60-tick runs, seed 0, first 10 ticks dropped as
+# warm-up, LIFNetwork driven directly at a fixed distance): food_mask's
+# per-tick spike fraction is ~0.63 at distance=0 (proximity=1.0, full
+# _FOOD_BOOST), ~0.47 at distance=4 (proximity~0.61, already close),
+# ~0.30 at distance=7.8 (proximity~0.38, the fly's own spawn distance),
+# and flattens out to ~0.22-0.24 by distance>=16-50 (proximity <0.14) --
+# indistinguishable from the ~0.25-0.29 no-boost/no-food baseline this
+# same channel had before the gradient existed. So a full trajectory
+# (see tests/test_engine.py) sees food_activity swing across roughly that
+# same ~0.22-0.65 span as the fly moves toward and orbits FOOD_POSITION,
+# not a step function -- see test_food_gradient_scales_with_distance.
 _FOOD_BOOST = 2.0
+_FOOD_RANGE = 8.0
 _FOOD_EMA_ALPHA = 0.1
+
+# Advances (self._x, self._z) each tick exactly the way the frontend's
+# own client-side dead reckoning always has (frontend/index.html's
+# animate() loop: `fly.position.x/z += sin/cos(heading) * speed * 0.05`,
+# run once per rendered frame at ~60fps) -- so the engine's new
+# authoritative position accrues distance at the same real-world rate
+# the frontend already made familiar: 0.05 units/frame * ~60 frames/s =
+# ~3.0 units/s at speed=1 (full activity_norm); a 20 Hz tick needs
+# 3.0/20 = 0.15 units/tick to match that. Empirically, typical unboosted
+# `speed` early in a run (mood_level still ramping) is ~0.3, i.e. ~0.9
+# units/s -- the ~7.8-unit straight-line spawn-to-FOOD_POSITION distance
+# would take ~170 ticks (~8.7s) walked dead straight. With the chemotaxis
+# steering bias below actually engaged, measured over seeds 0-2 (2500
+# ticks each, see tests/test_engine.py): the fly first comes within 2
+# units of FOOD_POSITION at tick ~309/349/534 (~15-27s of sim time) and
+# stays orbiting close to it (median distance <0.2) for the rest of the
+# run -- not instant, not never.
+_POSITION_STEP = 0.15
+
+# Chemotaxis-like steering bias (see README.md, "Where this is headed" --
+# "A world"): nudges heading toward the true bearing to FOOD_POSITION
+# each tick, on top of (not instead of) the existing stochastic wander
+# and mood-driven wobble below. Strength scales with food_activity, which
+# is itself now proximity-gated (see _FOOD_RANGE above) -- so the pull is
+# only strong once the fly has genuinely picked up food-drive, and stays
+# small at the ~0.22-0.24 baseline food_activity sits at with no food
+# nearby (see _FOOD_RANGE's comment for the measured distance sweep),
+# letting the fly wander close to undirected until it is actually within
+# scent range. 0.35 is picked so that at food_activity's near-food peak
+# (~0.6-0.65) and a maximal 180 degree heading/bearing mismatch, the bias
+# contributes up to ~40 degrees/tick -- comparable to or larger than the
+# existing wander/wobble terms, enough to reliably win out and turn the
+# fly toward food once it is close, without ever fully overriding them
+# (it is added to, not substituted for, the stochastic terms).
+_FOOD_STEER_GAIN = 0.35
 
 
 class Simulation:
@@ -72,6 +146,13 @@ class Simulation:
         self.tick = 0
         self.sim_time_ms = 0.0
         self._heading = 0.0
+        # (0.0, 0.0) matches the frontend's fly spawn point exactly
+        # (frontend/index.html: `fly.position.set(0, 3, 0)`, y irrelevant
+        # here) -- this is the engine's first-ever notion of where the fly
+        # actually is; previously position existed only client-side, as
+        # the frontend's own dead-reckoning integration.
+        self._x = 0.0
+        self._z = 0.0
         self._motor_ema = None
         self._food_ema = None
         self._rng = np.random.default_rng(seed)
@@ -92,10 +173,17 @@ class Simulation:
         # baseline drive: still uniform noise across all 139,255 neurons,
         # still needed for general spontaneous network activity (this is
         # not a full sensory model, just a noise floor everything sits
-        # on). food_mask gets an extra, real, always-on boost on top of
-        # it below -- see _FOOD_BOOST's comment.
+        # on). food_mask gets an extra, proximity-scaled boost on top of
+        # it below -- see FOOD_POSITION/_FOOD_BOOST/_FOOD_RANGE's comment.
+        # Uses (self._x, self._z) as of the END of the previous tick (this
+        # tick hasn't moved yet -- position advances further down, after
+        # the heading update) so "how food-driven is this tick" and "how
+        # far did that food-drive just steer the heading" both read the
+        # same position.
+        food_distance = math.hypot(self._x - FOOD_POSITION[0], self._z - FOOD_POSITION[1])
+        food_proximity = math.exp(-food_distance / _FOOD_RANGE)
         drive = self._rng.normal(0.15 + mood_level * 0.15, 0.1, size=self.net.n).astype(np.float32)
-        drive[self.net.food_mask] += _FOOD_BOOST
+        drive[self.net.food_mask] += _FOOD_BOOST * food_proximity
 
         spikes = self.net.step(DT_MS, drive, motor_threshold_scale=motor_threshold_scale)
         self.tick += 1
@@ -145,12 +233,35 @@ class Simulation:
         # opposite of the impairment-driven wobble the earlier bac_level
         # version had.
         wobble = (1.0 - mood_level) * self._rng.normal(0, 25)
-        self._heading = (self._heading + self._rng.normal(2, 5) + wobble) % 360
+
+        # Chemotaxis-like steering bias toward FOOD_POSITION -- see
+        # _FOOD_STEER_GAIN's comment. bearing_to_food uses the same
+        # sin(heading)=dx, cos(heading)=dz convention the position update
+        # below moves in, via atan2(dx, dz) (not the more usual
+        # atan2(dz, dx)) so a heading exactly equal to this bearing walks
+        # straight at the food. steer is a signed nudge toward that
+        # bearing along the shorter arc (wrapped to [-180, 180)) and is
+        # added alongside, never instead of, the stochastic terms above.
+        food_dx = FOOD_POSITION[0] - self._x
+        food_dz = FOOD_POSITION[1] - self._z
+        bearing_to_food = math.degrees(math.atan2(food_dx, food_dz)) % 360
+        angular_diff = ((bearing_to_food - self._heading + 180) % 360) - 180
+        steer = angular_diff * _FOOD_STEER_GAIN * food_activity
+
+        self._heading = (self._heading + self._rng.normal(2, 5) + wobble + steer) % 360
         speed = activity_norm
         if action == "flying":
             wing_state = "buzzing" if activity_norm > 0.85 else "raised"
         else:
             wing_state = "folded"
+
+        # Position advances from the just-updated heading/speed, the same
+        # way the frontend's own client-side dead reckoning always has --
+        # see _POSITION_STEP's comment for why this constant matches that
+        # existing per-second rate.
+        heading_rad = math.radians(self._heading)
+        self._x += math.sin(heading_rad) * speed * _POSITION_STEP
+        self._z += math.cos(heading_rad) * speed * _POSITION_STEP
 
         return {
             "schema_version": SCHEMA_VERSION,
@@ -168,6 +279,7 @@ class Simulation:
                 "heading_deg": self._heading,
                 "speed": speed,
                 "wing_state": wing_state,
+                "position": {"x": self._x, "z": self._z},
             },
             "meta": {"status": "running", "notes": ""},
         }

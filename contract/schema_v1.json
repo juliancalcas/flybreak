@@ -6,7 +6,7 @@
   "required": ["schema_version", "tick", "sim_time_ms", "stimulus", "activity", "motor_state", "meta"],
   "additionalProperties": false,
   "properties": {
-    "schema_version": { "const": "1.2" },
+    "schema_version": { "const": "1.3" },
     "tick": { "type": "integer", "minimum": 0 },
     "sim_time_ms": { "type": "number", "minimum": 0 },
     "stimulus": {
@@ -42,13 +42,22 @@
     },
     "motor_state": {
       "type": "object",
-      "required": ["action", "heading_deg", "speed", "wing_state"],
+      "required": ["action", "heading_deg", "speed", "wing_state", "position"],
       "additionalProperties": false,
       "properties": {
         "action": { "type": "string", "enum": ["idle", "walking", "grooming", "flying", "frozen"] },
         "heading_deg": { "type": "number", "minimum": 0, "exclusiveMaximum": 360 },
         "speed": { "type": "number", "minimum": 0 },
-        "wing_state": { "type": "string", "enum": ["folded", "raised", "buzzing"] }
+        "wing_state": { "type": "string", "enum": ["folded", "raised", "buzzing"] },
+        "position": {
+          "type": "object",
+          "required": ["x", "z"],
+          "additionalProperties": false,
+          "properties": {
+            "x": { "type": "number" },
+            "z": { "type": "number" }
+          }
+        }
       }
     },
     "meta": {
