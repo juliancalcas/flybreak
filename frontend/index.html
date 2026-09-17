@@ -46,6 +46,15 @@
     border-radius: 4px; padding: 3px 8px; margin-top: 6px;
   }
   #mood-mode-btn:hover { background: rgba(120,255,170,0.2); }
+
+  #synapse-panel {
+    position: absolute; right: 16px; bottom: 16px;
+    width: 360px;
+  }
+  #synapse-panel .label { margin-bottom: 4px; }
+  #synapse-canvas { display: block; width: 100%; height: auto; aspect-ratio: 720 / 520; }
+  #synapse-legend { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 6px; font-size: 10px; opacity: 0.85; }
+  #synapse-legend span.dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 4px; vertical-align: middle; }
 </style>
 </head>
 <body>
@@ -77,6 +86,17 @@
     <div class="mood-scale"><span>feliz</span><span>muy feliz</span><span>plena</span></div>
     <button id="mood-mode-btn" type="button">mode: auto</button>
   </div>
+
+  <div class="panel" id="synapse-panel">
+    <div class="label" id="synapse-label">synapse map (waiting for graph...)</div>
+    <canvas id="synapse-canvas" width="720" height="520"></canvas>
+    <div id="synapse-legend">
+      <span><span class="dot" style="background:#4ad8ff;"></span>visual</span>
+      <span><span class="dot" style="background:#ffffff;"></span>motor</span>
+      <span><span class="dot" style="background:#ff9d3d;"></span>food</span>
+      <span><span class="dot" style="background:#3a5a4a;"></span>other</span>
+    </div>
+  </div>
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
@@ -96,7 +116,15 @@
     ws.onerror = () => ws.close();
     ws.onmessage = (event) => {
       try {
-        latest = JSON.parse(event.data);
+        const msg = JSON.parse(event.data);
+        // the one-time synapse_graph message (sent once, right when the
+        // socket opens, before any tick) is distinguished from a regular
+        // tick by having a `type` field -- a tick payload never does.
+        if (msg.type === "synapse_graph") {
+          buildSynapseGraph(msg);
+          return;
+        }
+        latest = msg;
         renderHud(latest);
       } catch (e) {
         // a malformed frame from the engine must not crash the HUD
@@ -168,6 +196,11 @@
     for (let i = 0; i < others.length && i + 1 < flies.length; i++) {
       applyFlyState(flies[i + 1], others[i]);
     }
+
+    // real per-tick spikes from the synapse sample (fly 0 only, same as
+    // activity/stimulus always have been -- see world.other_flies loop
+    // above, which never gets this).
+    applySynapseSpikes(tick.activity.sample_spikes);
   }
 
   // ---- mood_level control: hybrid (auto ramp in the engine, manual override
@@ -196,6 +229,167 @@
   function setMode(next) {
     mode = next;
     modeBtn.textContent = "mode: " + mode + (mode === "manual" ? " (tap to release)" : "");
+  }
+
+  // ---- synapse map: a real ~250-neuron / ~1000-edge induced subgraph of
+  // the actual FlyWire connectome (see contract/schema_graph_v1.json),
+  // sent once per connection as the "synapse_graph" message, rendered here
+  // as its own 2D canvas HUD panel so ~250 nodes don't have to be force-
+  // simulated live at 20Hz. Layout is computed exactly once, when that
+  // message arrives, and never reshuffled again -- only per-tick spike
+  // activity (tick.activity.sample_spikes) animates on top of it. This is
+  // fly-0-only, same as activity/stimulus always have been; other_flies
+  // never gets a graph of its own (see server.py). Kept independent of
+  // THREE/the 3D scene below -- pure canvas 2D, no library. ----
+  const synapseCanvas = document.getElementById("synapse-canvas");
+  const synapseCtx = synapseCanvas.getContext("2d");
+  const synapseLabel = document.getElementById("synapse-label");
+  const SYNAPSE_W = synapseCanvas.width;
+  const SYNAPSE_H = synapseCanvas.height;
+  const GOLDEN_ANGLE = 2.3999632297286535; // radians; deterministic even fill, no RNG
+
+  let synapseGraph = null;      // { nodes, edges } as received, unmodified
+  let synapseLayout = null;     // [{x,y}, ...] indexed by node id, fixed after first build
+  let synapseAdjacency = null;  // [[edgeIndex, ...], ...] indexed by node id
+  let nodeFlash = null;         // Float32Array 0..1, per node id, decays every tick
+  let edgeFlash = null;         // Float32Array 0..1, per edge index, decays every tick
+
+  // real region string -> the same body-part accent color this project
+  // already uses for that region on the fly's own anatomy (PART_COLORS
+  // above), so the graph panel and the 3D fly read as one color language.
+  // is_food/is_motor/is_visual are checked in this priority order when a
+  // sampled node (rare, but real) carries more than one flag; nodes with
+  // none of the three (expected -- real neurons reached by BFS beyond the
+  // seed populations, not an error) fall back to a neutral dim tone.
+  const SYNAPSE_NODE_COLOR = {
+    visual: "#4ad8ff", // matches PART_COLORS.eyes.bright
+    motor: "#ffffff",  // matches PART_COLORS.legs.bright
+    food: "#ff9d3d",   // matches PART_COLORS.proboscis.bright / the food landmark
+    neutral: "#3a5a4a",
+  };
+  function synapseNodeColor(node) {
+    if (node.is_visual) return SYNAPSE_NODE_COLOR.visual;
+    if (node.is_motor) return SYNAPSE_NODE_COLOR.motor;
+    if (node.is_food) return SYNAPSE_NODE_COLOR.food;
+    return SYNAPSE_NODE_COLOR.neutral;
+  }
+
+  // deterministic, non-random layout: cluster nodes by their real `region`
+  // string, place clusters evenly around a circle (sorted region names, so
+  // it's stable/reproducible), and fill each cluster disc with a
+  // golden-angle spiral (even spread, no overlap, no RNG, no physics
+  // library) -- computed once, here, and never touched again.
+  function computeSynapseLayout(graph) {
+    const cx = SYNAPSE_W / 2, cy = SYNAPSE_H / 2;
+    const outerR = Math.min(SYNAPSE_W, SYNAPSE_H) * 0.40;
+    const byRegion = new Map();
+    for (let i = 0; i < graph.nodes.length; i++) {
+      const region = graph.nodes[i].region;
+      if (!byRegion.has(region)) byRegion.set(region, []);
+      byRegion.get(region).push(i);
+    }
+    const regions = Array.from(byRegion.keys()).sort();
+    const layout = new Array(graph.nodes.length);
+    regions.forEach((region, ri) => {
+      const angle = (ri / regions.length) * Math.PI * 2 - Math.PI / 2;
+      const clusterCx = cx + Math.cos(angle) * outerR;
+      const clusterCy = cy + Math.sin(angle) * outerR;
+      const members = byRegion.get(region);
+      const clusterR = Math.max(16, Math.min(60, 8 + members.length * 1.4));
+      members.forEach((nodeIdx, mi) => {
+        const frac = (mi + 0.5) / members.length;
+        const r = clusterR * Math.sqrt(frac);
+        const a = mi * GOLDEN_ANGLE;
+        layout[nodeIdx] = { x: clusterCx + Math.cos(a) * r, y: clusterCy + Math.sin(a) * r };
+      });
+    });
+    return layout;
+  }
+
+  // called once, the moment the one-time synapse_graph message arrives.
+  function buildSynapseGraph(graph) {
+    synapseGraph = graph;
+    nodeFlash = new Float32Array(graph.nodes.length);
+    edgeFlash = new Float32Array(graph.edges.length);
+    synapseAdjacency = Array.from({ length: graph.nodes.length }, () => []);
+    graph.edges.forEach((e, idx) => {
+      if (synapseAdjacency[e.source]) synapseAdjacency[e.source].push(idx);
+      if (synapseAdjacency[e.target]) synapseAdjacency[e.target].push(idx);
+    });
+    synapseLayout = computeSynapseLayout(graph);
+    // real count from the actual received message, not a hardcoded guess --
+    // the real engine's sample size may differ slightly from what's documented.
+    synapseLabel.textContent = "synapse map (" + graph.nodes.length + " real neurons)";
+    drawSynapseFrame();
+  }
+
+  // called every tick with tick.activity.sample_spikes (the local ids that
+  // genuinely spiked that specific tick, possibly empty). Existing flash on
+  // every node/edge decays a bit first (a brief pulse that fades over the
+  // next few ticks, not a permanent state change), then freshly spiked
+  // nodes -- and the real edges directly touching them -- light back up to
+  // full/partial brightness.
+  const FLASH_DECAY = 0.72;
+  function applySynapseSpikes(sampleSpikes) {
+    if (!synapseGraph) return;
+    for (let i = 0; i < nodeFlash.length; i++) nodeFlash[i] *= FLASH_DECAY;
+    for (let i = 0; i < edgeFlash.length; i++) edgeFlash[i] *= FLASH_DECAY;
+    if (sampleSpikes) {
+      for (const id of sampleSpikes) {
+        if (id < 0 || id >= nodeFlash.length) continue;
+        nodeFlash[id] = 1;
+        for (const edgeIdx of synapseAdjacency[id]) {
+          edgeFlash[edgeIdx] = Math.max(edgeFlash[edgeIdx], 0.65);
+        }
+      }
+    }
+    drawSynapseFrame();
+  }
+
+  function drawSynapseFrame() {
+    if (!synapseGraph || !synapseLayout) return;
+    const ctx = synapseCtx;
+    ctx.clearRect(0, 0, SYNAPSE_W, SYNAPSE_H);
+
+    const edges = synapseGraph.edges;
+    for (let i = 0; i < edges.length; i++) {
+      const e = edges[i];
+      const a = synapseLayout[e.source], b = synapseLayout[e.target];
+      if (!a || !b) continue;
+      const flash = edgeFlash[i];
+      if (flash > 0.03) {
+        ctx.strokeStyle = "rgba(255, 211, 90, " + Math.min(1, 0.25 + flash * 0.75).toFixed(3) + ")";
+        ctx.lineWidth = 1.3;
+      } else {
+        const w = Math.min(0.2, Math.abs(e.weight) * 0.1);
+        ctx.strokeStyle = "rgba(120, 255, 170, " + (0.05 + w).toFixed(3) + ")";
+        ctx.lineWidth = 0.5;
+      }
+      ctx.beginPath();
+      ctx.moveTo(a.x, a.y);
+      ctx.lineTo(b.x, b.y);
+      ctx.stroke();
+    }
+
+    const nodes = synapseGraph.nodes;
+    for (let i = 0; i < nodes.length; i++) {
+      const p = synapseLayout[i];
+      if (!p) continue;
+      const node = nodes[i];
+      const flash = nodeFlash[i];
+      const flagged = node.is_food || node.is_motor || node.is_visual;
+      const r = (flagged ? 2.6 : 1.8) + flash * 3.2;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+      if (flash > 0.03) {
+        ctx.fillStyle = "rgba(255, 244, 214, " + Math.min(1, 0.55 + flash * 0.45).toFixed(3) + ")";
+      } else {
+        ctx.globalAlpha = flagged ? 0.9 : 0.5;
+        ctx.fillStyle = synapseNodeColor(node);
+      }
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    }
   }
 
   // ---- Three.js scene: wireframe city + the fly ----
