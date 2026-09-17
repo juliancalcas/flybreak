@@ -26,8 +26,15 @@ python __main__.py                # fetches the connectome on first run (~50 MB)
 On Windows, double-clicking `run.bat` does the same thing without
 opening a terminal at all. Either way this is one process launching both
 servers in background threads and opening `http://localhost:8080` for you
--- Ctrl+C in that terminal stops both. See "Architecture" below for the two
-servers separately (useful when iterating on just one side), and
+-- Ctrl+C in that terminal stops both. `launcher.hta` is the same
+one-click launch with a small styled "Launch FlyBreak" button instead of
+a bare console window -- double-click it directly (it must run as its
+own trusted local application via Windows' `mshta.exe`, never opened
+*inside* a browser tab -- no web page, opened any way, is ever allowed
+to launch a local process; that is a universal browser security rule an
+`.hta` sits outside of, not a workaround of it). See "Architecture"
+below for the two servers separately (useful when iterating on just one
+side), and
 `.claude/skills/recover-stuck-git-pull/` if a `git pull` before any of this
 gets stuck on Windows with a "Deletion of directory ... failed" loop.
 

@@ -1,0 +1,103 @@
+<!-- FlyBreak launcher -- an HTML Application (.hta), not a web page.
+Double-click this file directly (like run.bat) to open it. Windows runs
+.hta files through mshta.exe as a trusted local app, NOT inside a
+browser -- that trust is exactly what lets its JavaScript launch
+run.bat, something no page opened in Chrome/Edge/Firefox is ever
+allowed to do (that's a universal browser security rule, not a FlyBreak
+limitation). Opening this file *from* a browser (File > Open, or
+dragging it into a Chrome tab) will not work -- it has to run as its
+own application. See README.md, "Quick start" for the equivalent
+one-command/run.bat routes if this file does not work in your setup. -->
+<html>
+<head>
+<title>FlyBreak</title>
+<hta:application
+  id="flybreakLauncher"
+  applicationname="FlyBreak"
+  border="thin"
+  caption="yes"
+  maximizebutton="no"
+  minimizebutton="yes"
+  showintaskbar="yes"
+  singleinstance="yes"
+  sysmenu="yes"
+  windowstate="normal"
+  scroll="no"
+/>
+<style>
+  html, body {
+    margin: 0; height: 100%; background: #05070a; color: #b7f7c8;
+    font-family: "SF Mono", Consolas, "Courier New", monospace;
+    display: flex; align-items: center; justify-content: center;
+  }
+  #card {
+    width: 420px; padding: 28px; box-sizing: border-box;
+    background: rgba(5, 15, 10, 0.9);
+    border: 1px solid rgba(120, 255, 170, 0.35);
+    border-radius: 8px; text-align: center;
+  }
+  h1 { margin: 0 0 6px; font-size: 20px; letter-spacing: 0.04em; color: #d9ffe6; }
+  p.sub { margin: 0 0 22px; font-size: 12px; opacity: 0.7; line-height: 1.5; }
+  button#launch {
+    font: inherit; font-size: 14px; color: #05070a; cursor: pointer;
+    background: #5affa0; border: none; border-radius: 6px;
+    padding: 12px 22px; width: 100%; letter-spacing: 0.03em;
+  }
+  button#launch:hover { background: #7dffb8; }
+  button#launch:disabled { background: #2a4a3a; color: #8ab99f; cursor: default; }
+  #status { margin-top: 16px; font-size: 12px; min-height: 32px; opacity: 0.85; white-space: pre-line; }
+  #status.error { color: #ff8a8a; }
+</style>
+</head>
+<body>
+<div id="card">
+  <h1>FlyBreak</h1>
+  <p class="sub">Real FlyWire connectome simulation.<br/>One click starts the engine and opens it in your browser.</p>
+  <button id="launch" onclick="launchFlyBreak()">&#9654; Launch FlyBreak</button>
+  <div id="status"></div>
+</div>
+
+<script language="javascript">
+function setStatus(text, isError) {
+  var el = document.getElementById("status");
+  el.innerText = text;
+  el.className = isError ? "error" : "";
+}
+
+function launchFlyBreak() {
+  var btn = document.getElementById("launch");
+  try {
+    var shell = new ActiveXObject("WScript.Shell");
+    // this .hta's own folder -- run.bat lives right next to it.
+    var htaPath = unescape(location.pathname).replace(/\//g, "\\");
+    var htaDir = htaPath.substring(0, htaPath.lastIndexOf("\\"));
+    var runBat = htaDir + "\\run.bat";
+
+    var fso = new ActiveXObject("Scripting.FileSystemObject");
+    if (!fso.FileExists(runBat)) {
+      setStatus("run.bat not found next to this file:\n" + runBat, true);
+      return;
+    }
+
+    btn.disabled = true;
+    btn.innerText = "Starting...";
+    setStatus("Launching the engine (loads the real connectome, ~10-15s on first run)\nand opening your browser. This window can stay open or be closed.");
+
+    shell.CurrentDirectory = htaDir;
+    // run.bat opens its own console window (it ends with `pause`) and
+    // the real browser tab itself -- this .hta's only job is the one
+    // click that starts it, not to keep running alongside it.
+    shell.Run('"' + runBat + '"', 1, false);
+
+    window.setTimeout(function () {
+      btn.innerText = "Launched -- check your browser";
+    }, 1200);
+  } catch (e) {
+    setStatus("Could not launch run.bat automatically (" + e.message + ").\nDouble-click run.bat directly instead.", true);
+    btn.disabled = false;
+    btn.innerText = "▶ Launch FlyBreak";
+  }
+}
+</script>
+</body>
+</html>
