@@ -311,10 +311,12 @@ class Simulation:
         # network.get_sample_graph) -- the LOCAL sample ids (0..N_sample-1,
         # matching that one-time message's node ids) that actually spiked
         # THIS tick, looked up from the real per-tick `spikes` vector above
-        # via the sample's real-neuron-index mapping. Typically a handful
-        # to a few dozen out of ~200-250 sampled neurons, given this
-        # network's own measured firing rates (see README.md/this module's
-        # other EMA comments) -- never the full 139,255-length vector.
+        # via the sample's real-neuron-index mapping. Typically ~4,300-4,500
+        # out of the ~10,000 sampled neurons once the network reaches its
+        # steady-state firing rate (measured directly; this network's own
+        # steady-state firing fraction runs ~40-45% of a given population,
+        # sample included -- see README.md's live-synapse-sample section)
+        # -- never the full 139,255-length vector.
         sample_spikes = np.nonzero(spikes[self._sample_real_index])[0].tolist()
 
         # the real "motor" super_class is tiny (110 of 139,255 neurons) --
@@ -585,13 +587,24 @@ async def _handle_client(ws: ServerConnection, world: World) -> None:
         reader_task.cancel()
 
 
+# websockets' own default max_size is 1 MiB -- fine for a tick payload,
+# but the one-time synapse_graph message at the current 10,000-node
+# sample size is a real measured 16.2 MB (10,000 nodes, 253,595 real
+# edges -- see README.md's "The live synapse sample"), which the default
+# would silently reject (connection closed, code 1009 "message too
+# big") the moment a client connects. 32 MiB gives real headroom above
+# that measured size without going unbounded.
+_MAX_WS_MESSAGE_BYTES = 32 * 1024 * 1024
+
+
 async def main(host: str = "127.0.0.1", port: int = 8765) -> None:
     print("Loading the real FlyWire connectome (139,255 neurons, ~10-15s, once)...")
     warm_cache()
     world = World()
     tick_task = asyncio.create_task(_tick_world(world))
     try:
-        async with websockets.serve(lambda ws: _handle_client(ws, world), host, port):
+        async with websockets.serve(lambda ws: _handle_client(ws, world), host, port,
+                                     max_size=_MAX_WS_MESSAGE_BYTES):
             print(f"FlyBreak engine listening on ws://{host}:{port} "
                   f"({N_FLIES} flies sharing one world)")
             await asyncio.Future()

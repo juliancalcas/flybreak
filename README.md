@@ -240,10 +240,13 @@ from each of `net.motor_mask`/`net.food_mask`/`net.visual_mask` -- the
 same three real populations `server.py` already reads every tick -- then
 BFS expands outward along the real edges in `w`, in both directions
 (who feeds a node, and who a node feeds), until the sample reaches a
-target size, hard-capped at 250 nodes. Measured on the real connectome as
-it stands today: **250 nodes, 986 directed edges** among them (the BFS
-frontier reached the 250-node cap before naturally running out of real
-neighbors to add). Every node is a real neuron with a real `super_class`
+target size, hard-capped at 10,000 nodes. Measured on the real
+connectome as it stands today: **10,000 nodes, 253,595 directed edges**
+among them (the BFS frontier reached the cap well before naturally
+running out of real neighbors to add -- at this scale the sample is
+dense, not a sparse scatter). Building it takes ~0.2s (cheap next to the
+~10-15s full connectome load it happens alongside, in `warm_cache()`).
+Every node is a real neuron with a real `super_class`
 region and the real `is_food`/`is_motor`/`is_visual` flags straight from
 those same masks; every edge's `weight` is a real, unmodified entry read
 directly out of the already-computed `w` matrix (`w[post, pre]`, same
@@ -265,20 +268,32 @@ schema, `contract/schema_graph_v1.json`, via `validate_graph()`/
 a tick message are structurally different things sent at different
 cadences, not two shapes of the same thing.
 
+At 10,000 nodes the one-time `synapse_graph` message itself is a real
+**16.2 MB** of JSON -- large enough that `websockets`' own default
+`max_size` (1 MiB) would silently reject it (connection closed, code
+1009 "message too big") the moment a client connected; `main()` raises
+it to 32 MiB (`_MAX_WS_MESSAGE_BYTES`), real headroom above the measured
+size without going unbounded. Worth knowing if this sample ever grows
+further: that ceiling would need raising again, deliberately, not hit by
+surprise.
+
 Every tick after that, fly 0's payload additionally carries
 `activity.sample_spikes` -- the LOCAL sample ids (matching the
 `synapse_graph` message's node `id`s, so the frontend never has to
 translate) that actually spiked *this specific tick*, read straight out
 of the real per-tick spike vector `LIFNetwork.step()` already computes,
 via a server-side-only mapping from local sample id back to real
-connectome index (never sent to the client). Typically a handful to a
-few dozen ids out of the ~250 sampled neurons, matching this project's
-own measured firing rates elsewhere -- never the full 139,255-length
-spike vector. Same "no neural introspection into a fly you don't
-control" boundary the rest of this project already follows for
-`activity`/`stimulus`: only fly 0 (the one a connecting browser controls)
-ever has its `sample_spikes` actually forwarded to a client, via the same
-`_build_client_payload` that already keeps `world.other_flies` minimal.
+connectome index (never sent to the client). At this sample size,
+typically **~4,300-4,500 of the 10,000** once the network reaches its
+steady-state firing rate (this network's own steady-state firing
+fraction runs ~40-45% of a given population, sample included) -- still
+never the full 139,255-length spike vector, but no longer "a handful"
+either now that the sample itself is this much bigger. Same "no neural
+introspection into a fly you don't control" boundary the rest of this
+project already follows for `activity`/`stimulus`: only fly 0 (the one a
+connecting browser controls) ever has its `sample_spikes` actually
+forwarded to a client, via the same `_build_client_payload` that already
+keeps `world.other_flies` minimal.
 
 ## The mood_level stimulus
 

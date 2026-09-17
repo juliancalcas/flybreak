@@ -104,10 +104,11 @@ def warm_cache() -> None:
     every connection -- not just the one that triggered it -- for the
     whole load. See server.py's `main()`, which calls this before
     `websockets.serve()`. Also forces `get_sample_graph()`'s one-time BFS
-    sample-build now, for the same reason -- it is cheap (a few hundred
-    nodes' worth of sparse-matrix slicing) next to the connectome load
-    itself, but still synchronous work that should happen before, not
-    during, the first client's connection.
+    sample-build now, for the same reason -- measured at ~0.2s for the
+    real 10,000-node sample (see README.md's "The live synapse sample"),
+    cheap next to the ~10-15s connectome load itself, but still
+    synchronous work that should happen before, not during, the first
+    client's connection.
     """
     _load_connectome()
     get_sample_graph()
@@ -278,8 +279,8 @@ class LIFNetwork:
 # `w`, so one sample reused for every fly and every client connection
 # for that process's lifetime.
 _SAMPLE_SEED_PER_POPULATION = 20
-_SAMPLE_TARGET_NODES = 200
-_SAMPLE_MAX_NODES = 250
+_SAMPLE_TARGET_NODES = 9500
+_SAMPLE_MAX_NODES = 10000
 
 
 @lru_cache(maxsize=1)
@@ -353,9 +354,10 @@ def get_sample_graph() -> dict:
     ]
 
     # The real (source, target, weight) edges among exactly this node
-    # set, sliced straight out of the already-computed `w` -- a small
-    # (<=250 x <=250) dense-ish sub-slice, not recomputed from the raw
-    # CSVs. `sub[a, b] = w[sample_real_index[a], sample_real_index[b]] =
+    # set, sliced straight out of the already-computed `w` -- a
+    # (<=10000 x <=10000) sub-slice, tiny next to the full (139255 x
+    # 139255) `w`, not recomputed from the raw CSVs. `sub[a, b] =
+    # w[sample_real_index[a], sample_real_index[b]] =
     # w[post=a, pre=b]` (see `w`'s own row/col convention), so an edge
     # runs from local id b (pre) to local id a (post).
     sub = c.w[sample_real_index, :][:, sample_real_index].tocoo()

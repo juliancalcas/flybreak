@@ -417,12 +417,13 @@ def test_sample_graph_is_deterministic_within_a_process():
 
 @requires_connectome
 def test_sample_graph_size_in_expected_range():
-    """~150-250 nodes -- large enough to look like a real network, small
-    enough to render live in a browser (see README.md's live-synapse-
-    sample section for why the full 139,255/~2.7M-synapse connectome
-    cannot be)."""
+    """~9,500-10,000 nodes -- large enough to look like a real network,
+    small enough (7.2% of the full connectome) to compute and ship once
+    per process (see README.md's live-synapse-sample section for why the
+    full 139,255/~2.7M-synapse connectome cannot be sent as-is; measured
+    there at 10,000 nodes / 253,595 edges)."""
     graph = get_sample_graph()
-    assert 150 <= len(graph["nodes"]) <= 250
+    assert 9500 <= len(graph["nodes"]) <= 10000
     assert len(graph["edges"]) > 0
 
 
@@ -505,7 +506,7 @@ def test_simulation_sample_spikes_sometimes_non_empty():
     mean the real-index mapping (or the sample itself) is disconnected
     from the network's actual spiking, not that the sample legitimately
     never fires (given this project's own measured firing rates, see
-    server.py's EMA comments -- a ~150-250 neuron sample sitting idle for
+    server.py's EMA comments -- a ~10,000 neuron sample sitting idle for
     80 straight ticks would be implausible)."""
     sim = Simulation(seed=5)
     any_non_empty = False
