@@ -1,12 +1,12 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "flybreak/contract/schema_v1.json",
+  "$id": "contract/schema_v1.json",
   "title": "FlyBreak tick",
   "type": "object",
   "required": ["schema_version", "tick", "sim_time_ms", "stimulus", "activity", "motor_state", "meta"],
   "additionalProperties": false,
   "properties": {
-    "schema_version": { "const": "1.1" },
+    "schema_version": { "const": "1.2" },
     "tick": { "type": "integer", "minimum": 0 },
     "sim_time_ms": { "type": "number", "minimum": 0 },
     "stimulus": {
@@ -20,7 +20,7 @@
     },
     "activity": {
       "type": "object",
-      "required": ["spike_count", "firing_rate_hz", "active_regions"],
+      "required": ["spike_count", "firing_rate_hz", "active_regions", "food_activity"],
       "additionalProperties": false,
       "properties": {
         "spike_count": { "type": "integer", "minimum": 0 },
@@ -36,7 +36,8 @@
               "activity": { "type": "number", "minimum": 0, "maximum": 1 }
             }
           }
-        }
+        },
+        "food_activity": { "type": "number", "minimum": 0, "maximum": 1 }
       }
     },
     "motor_state": {

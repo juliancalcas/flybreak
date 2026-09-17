@@ -93,9 +93,11 @@ python -m engine.server            # ws://127.0.0.1:8765, one Simulation per cli
 
 - `schema_v1.json` -- JSON Schema for one tick, matching the shape agreed
   in the project brief (`schema_version`, `tick`, `sim_time_ms`,
-  `stimulus`, `activity`, `motor_state`, `meta`). Currently `"1.1"` --
-  bumped from `"1.0"` when `stimulus.bac_level` was renamed to
-  `stimulus.mood_level` (see "The mood_level stimulus").
+  `stimulus`, `activity`, `motor_state`, `meta`). Currently `"1.2"` --
+  bumped from `"1.1"` when `activity.food_activity` was added (see "Where
+  this is headed"), which itself was bumped from `"1.0"` when
+  `stimulus.bac_level` was renamed to `stimulus.mood_level` (see "The
+  mood_level stimulus").
 - `validator.py` -- `validate_tick()` / `is_valid_tick()`, used by both the
   real engine and the mock stream so neither can silently drift from the
   schema.
@@ -169,6 +171,15 @@ tick-to-tick noise (std ~0.03) large enough relative to that span that
 `server.py` smooths it with an EMA before deriving `action`/`speed` --
 see its own comments for the measured numbers.
 
+`net.food_mask` (FlyWire's finer-grained `class`/`sub_class` columns this
+time, not `super_class`: `class == "gustatory"`, `sub_class ==
+"sugar/water"` -- 129 neurons, a real, identity-labeled appetitive taste
+channel) gets a static, always-on drive boost in `server.py`'s `step()`
+on top of the baseline noise every neuron still gets, reported as
+`activity.food_activity` -- see "Where this is headed" below for why
+this population, and `server.py`'s `_FOOD_BOOST` comment for the
+measured baseline-vs-boosted numbers.
+
 ## The mood_level stimulus
 
 `stimulus.mood_level` replaced an earlier "ethanol intoxication"
@@ -199,34 +210,57 @@ different kind of system from what exists today -- a disembodied fly with
 one scalar stimulus and no world to move through -- and it means at least:
 
 - **A world**: some spatial representation the fly can approach a food/
-  water source *toward*, not just an abstract stimulus value.
-- **Real sensory input, not a flat noise `drive`**: `network.py`'s current
-  `drive` array is uniform random noise across all 139,255 neurons.
-  FlyWire's own classification already names the real channels this
-  should route through instead -- `OLF_ORN_FOOD` (food odor, 1851
-  neurons), gustatory (taste on contact, 408 neurons), and the visual
-  pathway already modeled (`optic`, `visual_projection`) -- so driving
-  *those specific populations* when the fly is near food, rather than
-  exciting everything uniformly, is the real next step and is buildable
-  directly on today's `region_of`/`_region_masks` machinery.
+  water source *toward*, not just an abstract stimulus value. Not built
+  yet -- today's food stimulus (below) is static and always-present, no
+  navigation involved.
+- **Real sensory input, not a flat noise `drive`** (first step now done):
+  `network.py`'s `drive` array used to be uniform random noise across all
+  139,255 neurons, with nothing food- or danger-specific in it. An
+  earlier work cycle believed FlyWire's classification named a food-odor
+  channel (`OLF_ORN_FOOD`, 1851 neurons) and a danger-odor channel
+  (`OLF_ORN_DANGER`, 430 neurons) to route drive through -- **verified
+  against the real `classification.csv.gz` and this was wrong**: those
+  names do not exist anywhere in the data. `class == "olfactory"` does
+  split into two sub-populations of exactly those sizes, but neither is
+  labeled by odor identity -- their real `sub_class` is blank (1851
+  neurons) or `"pheromone"` (430 neurons), never `"food"` or `"danger"`.
+  What *is* genuinely identity-labeled, under `class == "gustatory"`
+  (taste on contact, 408 neurons total), is a real appetitive channel
+  (`sub_class == "sugar/water"`, 129 neurons) and a real aversive one
+  (`sub_class == "bitter"`, 65 neurons). `net.food_mask` (the gustatory
+  sugar/water population) now gets a static, always-present drive boost
+  in `server.py`'s `step()` -- "food is present," no spatial navigation
+  yet, the smallest real step described below, now taken. The visual
+  pathway (`optic`, `visual_projection`) is already modeled but not yet
+  driven by anything food-specific.
 - **Multiple flies**: more than one `Simulation` (or one shared world
   serving several), with some way for them to sense each other.
-- **No fear stimulus, ever**: `OLF_ORN_DANGER` (430 neurons) exists in the
-  real data and could be driven the way `solomonsealed/flybrain`'s own
-  walled-garden simulation drives it with spiderwebs -- deliberately never
-  wired to anything, by design, not by omission.
+- **No fear stimulus, ever**: `class == "gustatory"`, `sub_class ==
+  "bitter"` (65 neurons) is the real aversive analog of the fabricated
+  `OLF_ORN_DANGER` above -- it exists in the real data and could be
+  driven the way `solomonsealed/flybrain`'s own walled-garden simulation
+  drives its spiderweb-fear stimulus. Deliberately never masked, read, or
+  wired to anything anywhere in this codebase, by design, not by
+  omission -- same commitment as always, now pointed at the real label
+  instead of an invented one.
 
 `solomonsealed/flybrain` (already vendored here as the connectome data
 source) has already built almost exactly this world -- a walled orchard
 with fruit trees, food/odor/taste/touch senses, and up to 48 flies
 breeding -- minus the fear stimulus (it has spiderwebs) and running in a
 browser Web Worker, not this project's Python engine. The smallest real
-step toward "the goal" is not a full world simulation from scratch: it is
-wiring `OLF_ORN_FOOD` to a single, static, always-present food source (no
-spatial navigation yet, just "food is present" as a real sensory drive
-instead of uniform noise) and watching whether `mood_level`'s effect and
-genuine food-seeking activity are distinguishable in the real data -- one
-new sensory population, not a world engine.
+step toward "the goal" was not a full world simulation from scratch: it
+was wiring a single, static, always-present food source (no spatial
+navigation yet, just "food is present" as a real sensory drive instead of
+uniform noise) to `net.food_mask` and watching whether `mood_level`'s
+effect and genuine food-seeking activity are distinguishable in the real
+data -- one new sensory population, not a world engine. That step is done
+(see above); mood_level's own effect on `food_activity` is small (~0.03
+across the full sweep, see `server.py`'s `_FOOD_BOOST` comment) next to
+the boost's own effect (~0.35-0.40), so the two are in fact distinguishable
+in the real data. Still open: an actual spatial world to approach that
+food *toward*, and multiple flies sensing each other -- the fear channel
+stays unwired regardless.
 
 ## Attribution
 

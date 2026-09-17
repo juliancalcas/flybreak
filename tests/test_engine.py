@@ -7,13 +7,13 @@ from engine.network import LIFNetwork, data_available
 from engine.server import Simulation
 
 # LIFNetwork/Simulation load the real ~50 MB FlyWire connectome (see
-# network.py) -- these tests need `python -m flybreak.engine.fetch_connectome`
-# to have been run on this machine first. Skipping (not failing) when it
-# hasn't is what keeps `pytest flybreak/tests` usable on a fresh checkout;
-# the MoodController tests below need no data and always run.
+# network.py) -- these tests need `python -m engine.fetch_connectome` to
+# have been run on this machine first. Skipping (not failing) when it
+# hasn't is what keeps `pytest tests` usable on a fresh checkout; the
+# MoodController tests below need no data and always run.
 requires_connectome = pytest.mark.skipif(
     not data_available(),
-    reason="run `python -m flybreak.engine.fetch_connectome` first",
+    reason="run `python -m engine.fetch_connectome` first",
 )
 
 
@@ -34,6 +34,39 @@ def test_network_motor_mask_matches_real_super_classes():
     # the real FlyWire data: 110 "motor" + 1305 "descending" neurons
     assert net.motor_mask.sum() == 1415
     assert set(net.regions) >= {"motor", "descending", "optic", "sensory"}
+
+
+@requires_connectome
+def test_network_food_mask_matches_real_gustatory_sub_class():
+    net = LIFNetwork(seed=0)
+    # the real FlyWire data: 129 neurons with class=="gustatory",
+    # sub_class=="sugar/water" -- see network.py's FOOD_CLASS/
+    # FOOD_SUB_CLASS comment for why this (not the olfactory classes) is
+    # the real appetitive channel.
+    assert net.food_mask.sum() == 129
+
+
+@requires_connectome
+def test_food_boost_raises_food_mask_activity():
+    """net.food_mask actually responds to being driven harder -- guards
+    against a silent no-op if the boost or mask wiring breaks (see
+    server.py's _FOOD_BOOST, empirically ~0.25-0.29 baseline vs. ~0.62-
+    0.65 boosted on the real full-size network; this uses a looser bound
+    since it is not the full 139,255-neuron run that comment measured)."""
+    def food_activity(boost, seed=0, n_ticks=60):
+        net = LIFNetwork(seed=seed)
+        rng = np.random.default_rng(seed + 1)
+        fracs = []
+        for _ in range(n_ticks):
+            drive = rng.normal(0.2, 0.1, size=net.n).astype(np.float32)
+            drive[net.food_mask] += boost
+            spikes = net.step(dt_ms=50.0, drive=drive)
+            fracs.append(spikes[net.food_mask].mean())
+        return float(np.mean(fracs[10:]))  # drop warm-up transient
+
+    baseline = food_activity(boost=0.0)
+    boosted = food_activity(boost=2.0)
+    assert boosted > baseline + 0.15
 
 
 def test_mood_controller_auto_ramps_and_clamps():
@@ -69,6 +102,13 @@ def test_simulation_step_always_produces_a_valid_tick():
         payload = sim.step()
         validate_tick(payload)  # raises on any contract violation
     assert payload["tick"] == 100
+
+
+@requires_connectome
+def test_simulation_step_reports_food_activity():
+    sim = Simulation(seed=7)
+    payload = sim.step()
+    assert 0.0 <= payload["activity"]["food_activity"] <= 1.0
 
 
 @requires_connectome

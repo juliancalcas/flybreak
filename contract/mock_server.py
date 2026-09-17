@@ -1,9 +1,9 @@
 """Serves synthetic, schema-valid ticks over the same WebSocket contract as
 the real engine -- for iterating on the frontend before/without the LIF
-network running. Same port and message shapes as flybreak.engine.server, so
-the frontend does not know which one it is talking to.
+network running. Same port and message shapes as engine.server, so the
+frontend does not know which one it is talking to.
 
-Run from the repo root with: python -m flybreak.contract.mock_server
+Run from the repo root with: python -m contract.mock_server
 """
 from __future__ import annotations
 
@@ -39,8 +39,15 @@ def _mock_tick(tick: int, sim_time_ms: float, mood_level: float) -> dict:
     ]
     motor_activity = active_regions[-1]["activity"]
     action = "flying" if motor_activity > 0.7 else "walking" if motor_activity > 0.4 else "idle"
+    # plausible stand-in for the real engine's food_mask EMA (see
+    # server.py's _FOOD_BOOST comment for the measured real range: ~0.25-
+    # 0.29 baseline, ~0.62-0.65 with the static food boost applied) --
+    # oscillates across roughly that same span so a frontend built
+    # against the mock sees a realistic value before ever touching the
+    # real engine.
+    food_activity = 0.3 + 0.35 * ((math.sin(t * 0.3 + 3.0) + 1) / 2)
     return {
-        "schema_version": "1.1",
+        "schema_version": "1.2",
         "tick": tick,
         "sim_time_ms": sim_time_ms,
         "stimulus": {"mood_level": mood_level, "other_inputs": {}},
@@ -48,6 +55,7 @@ def _mock_tick(tick: int, sim_time_ms: float, mood_level: float) -> dict:
             "spike_count": random.randint(0, 400),
             "firing_rate_hz": random.uniform(0, 400),
             "active_regions": active_regions,
+            "food_activity": food_activity,
         },
         "motor_state": {
             "action": action,

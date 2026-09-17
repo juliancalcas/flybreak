@@ -1,12 +1,12 @@
 """Loads the real FlyWire FAFB v783 connectome and runs it as a sparse
 leaky integrate-and-fire network.
 
-Data: flybreak/engine/data/{connections,classification}.csv.gz -- fetch
-once per machine with `python -m flybreak.engine.fetch_connectome` (see
-that module's docstring for source, license and citation). Not vendored
-in git, see flybreak/.gitignore: at ~50 MB combined this is exactly the
-kind of external binary liveries/CLAUDE.md's own "What git versions and
-what it does not" keeps out of the repo, for the same reason.
+Data: engine/data/{connections,classification}.csv.gz -- fetch once per
+machine with `python -m engine.fetch_connectome` (see that module's
+docstring for source, license and citation). Not vendored in git, see
+.gitignore: at ~50 MB combined this is exactly the kind of external
+binary liveries/CLAUDE.md's own "What git versions and what it does not"
+keeps out of the repo, for the same reason.
 
 139,255 neurons. connections.csv ships ~3.9M per-synapse-annotation rows;
 building the sparse matrix below collapses them onto ~2.7M unique (pre,
@@ -45,6 +45,22 @@ _V_REST = 0.0
 # output IS a motor command, or that descend from the brain toward the
 # motor system in the ventral nerve cord.
 MOTOR_SUPER_CLASSES = frozenset({"motor", "descending"})
+
+# The real analog of "food is present" (see server.py's static food
+# boost). Not `super_class` this time -- FlyWire's finer-grained
+# `class`/`sub_class` columns are what actually carry appetitive/aversive
+# taste *identity* in this data. `class == "gustatory"`, `sub_class ==
+# "sugar/water"` is a real, labeled appetitive taste channel (129
+# neurons); `sub_class == "bitter"` (65 neurons) is the real aversive one
+# and is deliberately never masked or read anywhere in this codebase --
+# see README.md, "Where this is headed", "No fear stimulus, ever".
+# (`class == "olfactory"`'s two sub-populations -- 1851 neurons with
+# `sub_class == ""` and 430 with `sub_class == "pheromone"` -- carry no
+# food/danger identity in the real data; an earlier work cycle's
+# `OLF_ORN_FOOD`/`OLF_ORN_DANGER` names for them do not actually exist in
+# this dataset and have been corrected here and in README.md.)
+FOOD_CLASS = "gustatory"
+FOOD_SUB_CLASS = "sugar/water"
 
 # GABA is the fly CNS's primary fast inhibitory transmitter; glutamate
 # acts through inhibitory glutamate-gated chloride channels in insects
@@ -85,18 +101,22 @@ class _Connectome:
     regions: list                  # sorted distinct values of region_of
     region_masks: dict             # region -> (n,) bool mask, precomputed once
     motor_mask: np.ndarray         # (n,) bool, region_of in MOTOR_SUPER_CLASSES
+    food_mask: np.ndarray          # (n,) bool, class==FOOD_CLASS & sub_class==FOOD_SUB_CLASS
     w: sparse.csr_matrix           # (n, n), w[post, pre] = signed synapse weight
 
 
-def _read_classification() -> tuple[np.ndarray, np.ndarray]:
-    ids, supers = [], []
+def _read_classification() -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    ids, supers, classes, sub_classes = [], [], [], []
     with gzip.open(_CLASSIFICATION, "rt", newline="") as f:
         reader = csv.reader(f)
         next(reader)  # header
         for row in reader:
             ids.append(int(row[0]))
             supers.append(row[2] or "unclassified")
-    return np.array(ids, dtype=np.int64), np.array(supers, dtype=object)
+            classes.append(row[3])
+            sub_classes.append(row[4])
+    return (np.array(ids, dtype=np.int64), np.array(supers, dtype=object),
+            np.array(classes, dtype=object), np.array(sub_classes, dtype=object))
 
 
 def _read_connections() -> tuple[list, list, list, list]:
@@ -116,14 +136,15 @@ def _read_connections() -> tuple[list, list, list, list]:
 def _load_connectome() -> _Connectome:
     if not data_available():
         raise FileNotFoundError(
-            "flybreak/engine/data/ is missing the connectome CSVs -- run "
-            "`python -m flybreak.engine.fetch_connectome` once on this machine"
+            "engine/data/ is missing the connectome CSVs -- run "
+            "`python -m engine.fetch_connectome` once on this machine"
         )
-    root_ids, region_of = _read_classification()
+    root_ids, region_of, class_of, sub_class_of = _read_classification()
     n = len(root_ids)
     regions = sorted(set(region_of.tolist()))
     region_masks = {r: (region_of == r) for r in regions}
     motor_mask = np.isin(region_of, list(MOTOR_SUPER_CLASSES))
+    food_mask = (class_of == FOOD_CLASS) & (sub_class_of == FOOD_SUB_CLASS)
 
     index_of_id = {int(v): i for i, v in enumerate(root_ids.tolist())}
     pre_ids, post_ids, syn_strs, nt_types = _read_connections()
@@ -147,18 +168,19 @@ def _load_connectome() -> _Connectome:
     w = sparse.csr_matrix((weight, (post, pre)), shape=(n, n))
 
     return _Connectome(n=n, region_of=region_of, regions=regions,
-                        region_masks=region_masks, motor_mask=motor_mask, w=w)
+                        region_masks=region_masks, motor_mask=motor_mask,
+                        food_mask=food_mask, w=w)
 
 
 class LIFNetwork:
     """The real FlyWire connectome (139,255 neurons) as a sparse LIF
     population, grouped by FlyWire's own `super_class` annotation.
 
-    Requires `python -m flybreak.engine.fetch_connectome` to have been run
-    once on this machine. The expensive, shared parts (connectivity,
-    region grouping) are loaded once per process via `_load_connectome`'s
-    cache; each instance only owns its own membrane potential / spike
-    state, so creating one per client connection is cheap.
+    Requires `python -m engine.fetch_connectome` to have been run once on
+    this machine. The expensive, shared parts (connectivity, region
+    grouping) are loaded once per process via `_load_connectome`'s cache;
+    each instance only owns its own membrane potential / spike state, so
+    creating one per client connection is cheap.
     """
 
     def __init__(self, seed: int = 0):
@@ -168,6 +190,7 @@ class LIFNetwork:
         self.regions = connectome.regions
         self._region_masks = connectome.region_masks
         self.motor_mask = connectome.motor_mask
+        self.food_mask = connectome.food_mask
         self.w = connectome.w
 
         self.v = np.full(self.n, _V_REST, dtype=np.float32)
