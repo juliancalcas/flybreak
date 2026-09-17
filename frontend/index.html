@@ -31,6 +31,7 @@
   .regions { min-width: 190px; }
   .region-bar-track { background: rgba(120,255,170,0.12); border-radius: 3px; height: 5px; margin: 3px 0 6px; overflow: hidden; }
   .region-bar-fill { background: #5affa0; height: 100%; transition: width 0.15s linear; }
+  .food-bar-fill { background: #ff9d3d; }
 
   #status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 6px; }
   .status-connected { background: #5affa0; box-shadow: 0 0 6px #5affa0; }
@@ -60,6 +61,8 @@
       <div class="row"><span class="label">rate</span><span id="rate">-</span></div>
       <div class="row"><span class="label">action</span><span id="action">-</span></div>
       <div class="row"><span class="label">wing</span><span id="wing">-</span></div>
+      <div class="row"><span class="label">food</span><span id="food-value">-</span></div>
+      <div class="region-bar-track"><div class="region-bar-fill food-bar-fill" id="food-bar" style="width:0%"></div></div>
     </div>
 
     <div class="panel regions">
@@ -119,6 +122,11 @@
     document.getElementById("rate").textContent = tick.activity.firing_rate_hz.toFixed(1) + " Hz";
     document.getElementById("action").textContent = tick.motor_state.action;
     document.getElementById("wing").textContent = tick.motor_state.wing_state;
+
+    const foodPct = Math.round(tick.activity.food_activity * 100);
+    document.getElementById("food-value").textContent = foodPct + "%";
+    document.getElementById("food-bar").style.width = foodPct + "%";
+    foodActivity = tick.activity.food_activity;
 
     const list = document.getElementById("region-list");
     list.innerHTML = "";
@@ -224,6 +232,17 @@
   fly.position.set(0, 3, 0);
   scene.add(fly);
 
+  // the food source: a static, always-present prop (net.food_mask's
+  // gustatory sugar/water population). No spatial navigation exists yet
+  // (see README "Where this is headed"), so this is a fixed landmark, not
+  // something the fly walks toward -- it just visually pulses with the
+  // real food_activity value each tick.
+  const foodMat = new THREE.MeshBasicMaterial({ color: 0xff9d3d, wireframe: true, transparent: true, opacity: 0.5 });
+  const food = new THREE.Mesh(new THREE.IcosahedronGeometry(1.1, 1), foodMat);
+  food.position.set(6, 1.4, 5);
+  scene.add(food);
+  let foodActivity = 0.3; // baseline noise floor until the first tick arrives
+
   let wingFlap = 0;
   function applyMotorState(motorState) {
     fly.rotation.y = THREE.MathUtils.degToRad(motorState.heading_deg);
@@ -251,6 +270,14 @@
     const flapAngle = wingState === "folded" ? 1.4 : Math.sin(wingFlap) * 0.6;
     wingL.rotation.z = flapAngle;
     wingR.rotation.z = -flapAngle;
+
+    // food source pulses with food_activity: higher activity -> faster
+    // pulse, bigger swing, more opaque wireframe.
+    const foodPeriod = 500 - foodActivity * 300;
+    const foodPulse = 1 + Math.sin(performance.now() / foodPeriod) * (0.1 + foodActivity * 0.35);
+    food.scale.setScalar(foodPulse);
+    food.rotation.y += 0.002 + foodActivity * 0.01;
+    foodMat.opacity = 0.3 + foodActivity * 0.6;
 
     camera.position.x = Math.sin(performance.now() / 20000) * 30;
     camera.position.z = 28 + Math.cos(performance.now() / 20000) * 10;
