@@ -233,10 +233,11 @@
   scene.add(fly);
 
   // the food source: a static, always-present prop (net.food_mask's
-  // gustatory sugar/water population). No spatial navigation exists yet
-  // (see README "Where this is headed"), so this is a fixed landmark, not
-  // something the fly walks toward -- it just visually pulses with the
-  // real food_activity value each tick.
+  // gustatory sugar/water population) at a fixed landmark position. The
+  // engine's own chemotaxis-like steering now biases the fly's real
+  // position (tick.motor_state.position) toward it as it gets close; on
+  // top of that it visually pulses with the real food_activity value each
+  // tick.
   const foodMat = new THREE.MeshBasicMaterial({ color: 0xff9d3d, wireframe: true, transparent: true, opacity: 0.5 });
   const food = new THREE.Mesh(new THREE.IcosahedronGeometry(1.1, 1), foodMat);
   food.position.set(6, 1.4, 5);
@@ -244,25 +245,31 @@
   let foodActivity = 0.3; // baseline noise floor until the first tick arrives
 
   let wingFlap = 0;
+  // the engine is the single source of truth for the fly's x/z position
+  // (tick.motor_state.position); we just ease the rendered mesh toward the
+  // latest tick's value each animated frame so ~20Hz ticks don't look like
+  // ~60fps teleports.
+  const targetPos = { x: fly.position.x, z: fly.position.z };
+  const POSITION_LERP = 0.12;
   function applyMotorState(motorState) {
     fly.rotation.y = THREE.MathUtils.degToRad(motorState.heading_deg);
-    fly.userData.speed = motorState.speed;
     fly.userData.action = motorState.action;
     fly.userData.wingState = motorState.wing_state;
+    targetPos.x = motorState.position.x;
+    targetPos.z = motorState.position.z;
   }
 
   function animate() {
     requestAnimationFrame(animate);
 
-    const speed = (fly.userData.speed || 0);
     const action = fly.userData.action || "idle";
     if (action === "flying") {
       fly.position.y = 3 + Math.sin(performance.now() / 300) * 0.6;
     } else {
       fly.position.y = 1.2;
     }
-    fly.position.x += Math.sin(fly.rotation.y) * speed * 0.05;
-    fly.position.z += Math.cos(fly.rotation.y) * speed * 0.05;
+    fly.position.x += (targetPos.x - fly.position.x) * POSITION_LERP;
+    fly.position.z += (targetPos.z - fly.position.z) * POSITION_LERP;
 
     const wingState = fly.userData.wingState || "folded";
     const flapSpeed = wingState === "buzzing" ? 0.9 : wingState === "raised" ? 0.25 : 0;
