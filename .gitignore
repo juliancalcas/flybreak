@@ -21,3 +21,10 @@ __pycache__/
 # and it's a third-party download with its own provenance, not this
 # project's own work.
 engine/data/
+
+# The real flybody anatomical mesh -- ~81 MB across 49 .obj files +
+# LICENSE, fetched per machine with `python -m engine.fetch_flybody`,
+# same reasoning as engine/data/ above. SOURCE.md (this project's own
+# provenance/reasoning doc, a few KB of text) stays tracked.
+frontend/assets/flybody/*.obj
+frontend/assets/flybody/LICENSE

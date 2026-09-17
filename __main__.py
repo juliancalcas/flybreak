@@ -1,5 +1,6 @@
-"""One-command launcher: fetches the connectome if needed, starts the
-engine and the frontend's static server, opens the browser.
+"""One-command launcher: fetches the connectome and the flybody mesh if
+needed, starts the engine and the frontend's static server, opens the
+browser.
 
 Run from the repo root with: python __main__.py
 Ctrl+C stops both servers.
@@ -13,7 +14,7 @@ import webbrowser
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from engine import fetch_connectome, network
+from engine import fetch_connectome, fetch_flybody, network
 from engine import server as engine_server
 
 FRONTEND_DIR = Path(__file__).parent / "frontend"
@@ -41,6 +42,10 @@ def main() -> None:
     if not network.data_available():
         print("First run: fetching the real connectome data (~50 MB)...")
         fetch_connectome.fetch()
+
+    if not fetch_flybody.flybody_available():
+        print("First run: fetching the real flybody anatomical mesh (~81 MB)...")
+        fetch_flybody.fetch()
 
     print("Starting the engine (loads the real connectome, ~10-15s)...")
     _start_engine_thread()

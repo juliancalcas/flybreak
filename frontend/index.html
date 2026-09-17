@@ -47,6 +47,20 @@
   }
   #mood-mode-btn:hover { background: rgba(120,255,170,0.2); }
 
+  #mesh-loading {
+    position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%);
+    pointer-events: none; text-align: center; font-size: 13px;
+    color: #b7f7c8; text-shadow: 0 0 6px rgba(90, 255, 140, 0.35);
+  }
+  #mesh-loading .bar-track { width: 220px; height: 4px; margin: 8px auto 0; background: rgba(120,255,170,0.15); border-radius: 2px; overflow: hidden; }
+  #mesh-loading .bar-fill { height: 100%; width: 0%; background: #5affa0; transition: width 0.15s linear; }
+  #mesh-loading.hidden { display: none; }
+
+  #credits {
+    position: fixed; left: 16px; bottom: 6px; font-size: 9px; opacity: 0.4;
+    pointer-events: none; letter-spacing: 0.02em;
+  }
+
   #synapse-panel {
     position: absolute; right: 16px; bottom: 16px;
     width: 360px;
@@ -59,6 +73,8 @@
 </head>
 <body>
 <div id="scene"></div>
+<div id="mesh-loading"><div>loading fly anatomy...</div><div class="bar-track"><div class="bar-fill" id="mesh-loading-bar"></div></div></div>
+<div id="credits">fly anatomy: flybody (Google DeepMind + HHMI Janelia), Apache-2.0 -- Vaxenburg et al., <i>Nature</i> 643, 1312-1320 (2025)</div>
 
 <div id="hud">
   <div class="top-row">
@@ -100,6 +116,12 @@
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<!-- real DeepMind/HHMI Janelia flybody mesh assembly (see frontend/assets/flybody/SOURCE.md
+     and README.md's Attribution section) needs OBJLoader, which cdnjs's three.js mirror
+     does not carry (it only mirrors three.js's own build/ output, not examples/) -- confirmed
+     via cdnjs's own package manifest before picking jsdelivr's npm mirror instead, same r128
+     (three@0.128.0), same non-module examples/js build as three.min.js above. -->
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/OBJLoader.js"></script>
 <script>
 (function () {
   "use strict";
@@ -185,16 +207,23 @@
 
     // fly 0 (the controlled fly): real position/heading/action/wing state,
     // plus the only fly with real neural introspection -- its body parts
-    // are driven by their corresponding real region activity.
-    applyFlyState(flies[0], tick.motor_state);
-    driveFlyRegions(flies[0], regionMap, tick.activity.food_activity);
+    // are driven by their corresponding real region activity. Guarded:
+    // the real flybody mesh (see loadFlybodyAssets below) loads once,
+    // asynchronously, so `flies` stays empty for a brief moment after the
+    // page opens -- ticks that arrive before it's ready are simply not
+    // applied to a fly mesh yet (everything else in the HUD still updates
+    // normally); once ready, the loader replays the latest tick itself.
+    if (flies.length) {
+      applyFlyState(flies[0], tick.motor_state);
+      driveFlyRegions(flies[0], regionMap, tick.activity.food_activity);
 
-    // the other two flies: real position/heading/action/wing_state only --
-    // no activity/stimulus is ever sent for them (see server.py), so their
-    // anatomy stays generic/non-region-driven (see createFlyMesh/driveFlyRegions).
-    const others = tick.world.other_flies;
-    for (let i = 0; i < others.length && i + 1 < flies.length; i++) {
-      applyFlyState(flies[i + 1], others[i]);
+      // the other two flies: real position/heading/action/wing_state only --
+      // no activity/stimulus is ever sent for them (see server.py), so their
+      // anatomy stays generic/non-region-driven (see createFlyMesh/driveFlyRegions).
+      const others = tick.world.other_flies;
+      for (let i = 0; i < others.length && i + 1 < flies.length; i++) {
+        applyFlyState(flies[i + 1], others[i]);
+      }
     }
 
     // real per-tick spikes from the synapse sample (fly 0 only, same as
@@ -231,25 +260,28 @@
     modeBtn.textContent = "mode: " + mode + (mode === "manual" ? " (tap to release)" : "");
   }
 
-  // ---- synapse map: a real ~250-neuron / ~1000-edge induced subgraph of
-  // the actual FlyWire connectome (see contract/schema_graph_v1.json),
-  // sent once per connection as the "synapse_graph" message, rendered here
-  // as its own 2D canvas HUD panel so ~250 nodes don't have to be force-
-  // simulated live at 20Hz. Layout is computed exactly once, when that
-  // message arrives, and never reshuffled again -- only per-tick spike
-  // activity (tick.activity.sample_spikes) animates on top of it. This is
-  // fly-0-only, same as activity/stimulus always have been; other_flies
-  // never gets a graph of its own (see server.py). Kept independent of
-  // THREE/the 3D scene below -- pure canvas 2D, no library. ----
+  // ---- synapse map: a real ~200-250-neuron induced subgraph of the actual
+  // FlyWire connectome (see contract/schema_graph_v1.json + network.py's
+  // get_sample_graph()), sent once per connection as the "synapse_graph"
+  // message, rendered here as a small dedicated Three.js scene (its own
+  // WebGLRenderer targeting the #synapse-canvas element, its own camera --
+  // fully independent of the main city/fly scene above and its orbit, never
+  // touches it) instead of the flat 2D canvas node-link diagram this used
+  // to be, so overlapping glowing points can actually read as the soft
+  // volumetric cloud the reference look calls for. Layout is computed
+  // exactly once, when that message arrives, and never reshuffled again --
+  // only per-tick spike activity (tick.activity.sample_spikes) animates on
+  // top of it, same as before. This is fly-0-only, same as activity/
+  // stimulus always have been; other_flies never gets a graph of its own
+  // (see server.py). ----
   const synapseCanvas = document.getElementById("synapse-canvas");
-  const synapseCtx = synapseCanvas.getContext("2d");
   const synapseLabel = document.getElementById("synapse-label");
   const SYNAPSE_W = synapseCanvas.width;
   const SYNAPSE_H = synapseCanvas.height;
   const GOLDEN_ANGLE = 2.3999632297286535; // radians; deterministic even fill, no RNG
 
   let synapseGraph = null;      // { nodes, edges } as received, unmodified
-  let synapseLayout = null;     // [{x,y}, ...] indexed by node id, fixed after first build
+  let synapseLayout = null;     // [{x,y,z}, ...] indexed by node id, fixed after first build
   let synapseAdjacency = null;  // [[edgeIndex, ...], ...] indexed by node id
   let nodeFlash = null;         // Float32Array 0..1, per node id, decays every tick
   let edgeFlash = null;         // Float32Array 0..1, per edge index, decays every tick
@@ -262,10 +294,10 @@
   // none of the three (expected -- real neurons reached by BFS beyond the
   // seed populations, not an error) fall back to a neutral dim tone.
   const SYNAPSE_NODE_COLOR = {
-    visual: "#4ad8ff", // matches PART_COLORS.eyes.bright
-    motor: "#ffffff",  // matches PART_COLORS.legs.bright
-    food: "#ff9d3d",   // matches PART_COLORS.proboscis.bright / the food landmark
-    neutral: "#3a5a4a",
+    visual: 0x4ad8ff, // matches PART_COLORS.eyes.bright
+    motor: 0xffffff,  // matches PART_COLORS.legs.bright
+    food: 0xff9d3d,   // matches PART_COLORS.proboscis.bright / the food landmark
+    neutral: 0x3a5a4a,
   };
   function synapseNodeColor(node) {
     if (node.is_visual) return SYNAPSE_NODE_COLOR.visual;
@@ -275,13 +307,35 @@
   }
 
   // deterministic, non-random layout: cluster nodes by their real `region`
-  // string, place clusters evenly around a circle (sorted region names, so
-  // it's stable/reproducible), and fill each cluster disc with a
-  // golden-angle spiral (even spread, no overlap, no RNG, no physics
-  // library) -- computed once, here, and never touched again.
+  // string, place clusters evenly around a ring (sorted region names, so
+  // it's stable/reproducible), and fill each cluster with a golden-angle
+  // Fibonacci-sphere spiral (even 3D spread, no overlap, no RNG, no physics
+  // library) instead of the old flat 2D disc -- same deterministic
+  // technique as before, just extended to a 3rd axis so each region reads
+  // as a real soft volumetric clump, not a flat spiral. Computed once,
+  // here, and never touched again.
+  // "sphere of spheres": region cluster centers are themselves placed on a
+  // Fibonacci sphere (not a flat ring -- a first pass at this used a flat
+  // XZ ring and it read as a thin polygon outline, not a cloud), each
+  // filled with its own smaller Fibonacci-sphere spiral of member nodes,
+  // with cluster radius large enough relative to the overall cloud radius
+  // that neighboring clusters visually overlap -- the fractal-ish real
+  // structure (region -> its real member neurons) is what gives the
+  // rendered cloud its internal shape/color texture, not an arbitrary
+  // fabricated one; only the two radii are tuned for how it reads on
+  // screen, same as the old version's pixel radii were.
+  function fibonacciSpherePoint(i, n, radius) {
+    const yFrac = n > 1 ? 1 - (2 * i + 1) / n : 0; // -1..1, even pole-to-pole spread
+    const ringRadius = Math.sqrt(Math.max(0, 1 - yFrac * yFrac));
+    const a = i * GOLDEN_ANGLE;
+    return {
+      x: Math.cos(a) * ringRadius * radius,
+      y: yFrac * radius,
+      z: Math.sin(a) * ringRadius * radius,
+    };
+  }
+
   function computeSynapseLayout(graph) {
-    const cx = SYNAPSE_W / 2, cy = SYNAPSE_H / 2;
-    const outerR = Math.min(SYNAPSE_W, SYNAPSE_H) * 0.40;
     const byRegion = new Map();
     for (let i = 0; i < graph.nodes.length; i++) {
       const region = graph.nodes[i].region;
@@ -290,21 +344,93 @@
     }
     const regions = Array.from(byRegion.keys()).sort();
     const layout = new Array(graph.nodes.length);
+    const clusterCenterR = 0.5;
     regions.forEach((region, ri) => {
-      const angle = (ri / regions.length) * Math.PI * 2 - Math.PI / 2;
-      const clusterCx = cx + Math.cos(angle) * outerR;
-      const clusterCy = cy + Math.sin(angle) * outerR;
+      const center = fibonacciSpherePoint(ri, regions.length, clusterCenterR);
       const members = byRegion.get(region);
-      const clusterR = Math.max(16, Math.min(60, 8 + members.length * 1.4));
+      const clusterR = Math.max(0.14, Math.min(0.36, 0.06 + members.length * 0.009));
       members.forEach((nodeIdx, mi) => {
         const frac = (mi + 0.5) / members.length;
-        const r = clusterR * Math.sqrt(frac);
-        const a = mi * GOLDEN_ANGLE;
-        layout[nodeIdx] = { x: clusterCx + Math.cos(a) * r, y: clusterCy + Math.sin(a) * r };
+        const p = fibonacciSpherePoint(mi, members.length, clusterR * Math.cbrt(frac));
+        layout[nodeIdx] = { x: center.x + p.x, y: center.y + p.y, z: center.z + p.z };
       });
     });
     return layout;
   }
+
+  // a soft circular glow sprite, drawn once at startup via an offscreen
+  // canvas radial gradient (no external image fetch) -- THREE.Points +
+  // this + AdditiveBlending is what makes overlapping nodes bloom into
+  // soft volumetric-looking clusters, same trick the reference look uses.
+  function makeGlowSprite() {
+    const size = 64;
+    const c = document.createElement("canvas");
+    c.width = c.height = size;
+    const ctx = c.getContext("2d");
+    const g = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+    g.addColorStop(0, "rgba(255,255,255,1)");
+    g.addColorStop(0.3, "rgba(255,255,255,0.6)");
+    g.addColorStop(1, "rgba(255,255,255,0)");
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, size, size);
+    const tex = new THREE.CanvasTexture(c);
+    tex.needsUpdate = true;
+    return tex;
+  }
+
+  // fully independent scene/camera/renderer from the main city+fly scene
+  // above -- never shares or touches its camera/orbit logic.
+  const synapseScene = new THREE.Scene();
+  const synapseCamera = new THREE.PerspectiveCamera(42, SYNAPSE_W / SYNAPSE_H, 0.01, 10);
+  synapseCamera.position.set(0, 0.35, 1.55);
+  synapseCamera.lookAt(0, 0, 0);
+  const synapseRenderer = new THREE.WebGLRenderer({ canvas: synapseCanvas, antialias: true, alpha: true });
+  synapseRenderer.setClearColor(0x000000, 0);
+  synapseRenderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  synapseRenderer.setSize(SYNAPSE_W, SYNAPSE_H, false);
+  const synapseGlowTex = makeGlowSprite();
+  const SYNAPSE_FLASH_COLOR = new THREE.Color(0xfff4d6);
+  const _synTmp = new THREE.Color();
+
+  // stock THREE.PointsMaterial only takes one uniform size for every point
+  // (no per-vertex size support), so a small custom ShaderMaterial is used
+  // instead -- lets each point's real size (bigger for is_food/is_motor/
+  // is_visual, and growing further on a real spike flash) and real color
+  // both vary per-vertex while keeping the soft sprite + additive glow.
+  function makeSynapsePointsMaterial() {
+    return new THREE.ShaderMaterial({
+      uniforms: { pointTexture: { value: synapseGlowTex } },
+      vertexShader: `
+        attribute float size;
+        attribute vec3 pointColor;
+        varying vec3 vColor;
+        void main() {
+          vColor = pointColor;
+          vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+          gl_PointSize = size * (260.0 / -mvPosition.z);
+          gl_Position = projectionMatrix * mvPosition;
+        }
+      `,
+      fragmentShader: `
+        uniform sampler2D pointTexture;
+        varying vec3 vColor;
+        void main() {
+          vec4 tex = texture2D(pointTexture, gl_PointCoord);
+          gl_FragColor = vec4(vColor, 1.0) * tex;
+        }
+      `,
+      transparent: true,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+    });
+  }
+
+  let synapseGroup = null;
+  let synapsePoints = null, synapsePointsGeo = null;
+  let synapseLines = null, synapseLinesGeo = null;
+  let synapseBaseColors = null;  // THREE.Color[] per node, fixed after buildSynapseGraph
+  let synapseFlagged = null;     // boolean[] per node (is_food/is_motor/is_visual)
+  let synapseEdgeBaseColors = null; // THREE.Color[] per edge, fixed after buildSynapseGraph
 
   // called once, the moment the one-time synapse_graph message arrives.
   function buildSynapseGraph(graph) {
@@ -320,7 +446,67 @@
     // real count from the actual received message, not a hardcoded guess --
     // the real engine's sample size may differ slightly from what's documented.
     synapseLabel.textContent = "synapse map (" + graph.nodes.length + " real neurons)";
-    drawSynapseFrame();
+
+    if (synapseGroup) synapseScene.remove(synapseGroup);
+    synapseGroup = new THREE.Group();
+
+    const n = graph.nodes.length;
+    const positions = new Float32Array(n * 3);
+    const colors = new Float32Array(n * 3);
+    const sizes = new Float32Array(n);
+    synapseBaseColors = new Array(n);
+    synapseFlagged = new Array(n);
+    for (let i = 0; i < n; i++) {
+      const p = synapseLayout[i];
+      positions[i * 3] = p.x; positions[i * 3 + 1] = p.y; positions[i * 3 + 2] = p.z;
+      const node = graph.nodes[i];
+      const flagged = !!(node.is_food || node.is_motor || node.is_visual);
+      synapseFlagged[i] = flagged;
+      const base = new THREE.Color(synapseNodeColor(node));
+      synapseBaseColors[i] = base;
+      colors[i * 3] = base.r; colors[i * 3 + 1] = base.g; colors[i * 3 + 2] = base.b;
+      sizes[i] = flagged ? 0.16 : 0.1;
+    }
+    synapsePointsGeo = new THREE.BufferGeometry();
+    synapsePointsGeo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+    synapsePointsGeo.setAttribute("pointColor", new THREE.BufferAttribute(colors, 3));
+    synapsePointsGeo.setAttribute("size", new THREE.BufferAttribute(sizes, 1));
+    synapsePoints = new THREE.Points(synapsePointsGeo, makeSynapsePointsMaterial());
+    synapseGroup.add(synapsePoints);
+
+    // real edges, thin additive glowing threads through the cloud -- same
+    // real connectivity as before, just subdued relative to the node glow
+    // now that points (not lines) are what reads as "the graph".
+    const edges = graph.edges;
+    const linePositions = new Float32Array(edges.length * 6);
+    const lineColors = new Float32Array(edges.length * 6);
+    synapseEdgeBaseColors = new Array(edges.length);
+    for (let i = 0; i < edges.length; i++) {
+      const e = edges[i];
+      const a = synapseLayout[e.source], b = synapseLayout[e.target];
+      if (!a || !b) continue;
+      linePositions[i * 6] = a.x; linePositions[i * 6 + 1] = a.y; linePositions[i * 6 + 2] = a.z;
+      linePositions[i * 6 + 3] = b.x; linePositions[i * 6 + 4] = b.y; linePositions[i * 6 + 5] = b.z;
+      const w = Math.min(0.16, Math.abs(e.weight) * 0.07);
+      const base = new THREE.Color(0x2f6b4a).multiplyScalar(0.1 + w);
+      synapseEdgeBaseColors[i] = base;
+    }
+    synapseLinesGeo = new THREE.BufferGeometry();
+    synapseLinesGeo.setAttribute("position", new THREE.BufferAttribute(linePositions, 3));
+    synapseLinesGeo.setAttribute("color", new THREE.BufferAttribute(lineColors, 3));
+    // deliberately subtle -- points+glow (see makeSynapsePointsMaterial)
+    // are what reads as "the graph" now, real edges are just faint connective
+    // texture threading through the cloud, not the dominant visual language
+    // the old flat node-link diagram used to be.
+    const linesMat = new THREE.LineBasicMaterial({
+      vertexColors: true, transparent: true, opacity: 0.3,
+      blending: THREE.AdditiveBlending, depthWrite: false,
+    });
+    synapseLines = new THREE.LineSegments(synapseLinesGeo, linesMat);
+    synapseGroup.add(synapseLines);
+
+    synapseScene.add(synapseGroup);
+    renderSynapseFrame();
   }
 
   // called every tick with tick.activity.sample_spikes (the local ids that
@@ -343,69 +529,79 @@
         }
       }
     }
-    drawSynapseFrame();
+    renderSynapseFrame();
   }
 
-  function drawSynapseFrame() {
-    if (!synapseGraph || !synapseLayout) return;
-    const ctx = synapseCtx;
-    ctx.clearRect(0, 0, SYNAPSE_W, SYNAPSE_H);
-
-    const edges = synapseGraph.edges;
-    for (let i = 0; i < edges.length; i++) {
-      const e = edges[i];
-      const a = synapseLayout[e.source], b = synapseLayout[e.target];
-      if (!a || !b) continue;
-      const flash = edgeFlash[i];
-      if (flash > 0.03) {
-        ctx.strokeStyle = "rgba(255, 211, 90, " + Math.min(1, 0.25 + flash * 0.75).toFixed(3) + ")";
-        ctx.lineWidth = 1.3;
-      } else {
-        const w = Math.min(0.2, Math.abs(e.weight) * 0.1);
-        ctx.strokeStyle = "rgba(120, 255, 170, " + (0.05 + w).toFixed(3) + ")";
-        ctx.lineWidth = 0.5;
-      }
-      ctx.beginPath();
-      ctx.moveTo(a.x, a.y);
-      ctx.lineTo(b.x, b.y);
-      ctx.stroke();
-    }
+  function renderSynapseFrame() {
+    if (!synapseGraph || !synapsePoints) return;
 
     const nodes = synapseGraph.nodes;
+    const colorAttr = synapsePointsGeo.attributes.pointColor;
+    const sizeAttr = synapsePointsGeo.attributes.size;
     for (let i = 0; i < nodes.length; i++) {
-      const p = synapseLayout[i];
-      if (!p) continue;
-      const node = nodes[i];
       const flash = nodeFlash[i];
-      const flagged = node.is_food || node.is_motor || node.is_visual;
-      const r = (flagged ? 2.6 : 1.8) + flash * 3.2;
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+      _synTmp.copy(synapseBaseColors[i]);
+      if (flash > 0.02) _synTmp.lerp(SYNAPSE_FLASH_COLOR, Math.min(1, flash));
+      colorAttr.setXYZ(i, _synTmp.r, _synTmp.g, _synTmp.b);
+      sizeAttr.setX(i, (synapseFlagged[i] ? 0.16 : 0.1) + flash * 0.22);
+    }
+    colorAttr.needsUpdate = true;
+    sizeAttr.needsUpdate = true;
+
+    const edges = synapseGraph.edges;
+    const lineColorAttr = synapseLinesGeo.attributes.color;
+    for (let i = 0; i < edges.length; i++) {
+      const flash = edgeFlash[i];
       if (flash > 0.03) {
-        ctx.fillStyle = "rgba(255, 244, 214, " + Math.min(1, 0.55 + flash * 0.45).toFixed(3) + ")";
+        _synTmp.set(0xffd35a).multiplyScalar(Math.min(1, 0.5 + flash));
       } else {
-        ctx.globalAlpha = flagged ? 0.9 : 0.5;
-        ctx.fillStyle = synapseNodeColor(node);
+        _synTmp.copy(synapseEdgeBaseColors[i] || SYNAPSE_FLASH_COLOR);
       }
-      ctx.fill();
-      ctx.globalAlpha = 1;
+      lineColorAttr.setXYZ(i * 2, _synTmp.r, _synTmp.g, _synTmp.b);
+      lineColorAttr.setXYZ(i * 2 + 1, _synTmp.r, _synTmp.g, _synTmp.b);
+    }
+    lineColorAttr.needsUpdate = true;
+
+    synapseRenderer.render(synapseScene, synapseCamera);
+  }
+
+  // slow constant rotation, independent of ticks/spikes, purely so the
+  // cloud reads as genuinely volumetric (parallax between near/far
+  // clusters) rather than a static flat sprite -- its own rAF loop, fully
+  // separate from the main scene's animate() and its camera orbit.
+  function animateSynapsePanel() {
+    requestAnimationFrame(animateSynapsePanel);
+    if (synapseGroup) {
+      synapseGroup.rotation.y += 0.0025;
+      synapseRenderer.render(synapseScene, synapseCamera);
     }
   }
+  animateSynapsePanel();
 
   // ---- Three.js scene: wireframe city + the fly ----
   const container = document.getElementById("scene");
   const scene = new THREE.Scene();
   scene.fog = new THREE.FogExp2(0x05070a, 0.012);
 
+  const ORIGIN = new THREE.Vector3(0, 0, 0);
   const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 500);
   camera.position.set(0, 6, 10);
-  camera.lookAt(0, 0, 0);
+  camera.lookAt(ORIGIN);
 
   const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
   renderer.setPixelRatio(window.devicePixelRatio);
   renderer.setSize(window.innerWidth, window.innerHeight);
   renderer.setClearColor(0x05070a);
   container.appendChild(renderer.domElement);
+
+  // real shading for the real flybody mesh (see createFlyMesh below) --
+  // MeshBasicMaterial everywhere else in this scene (city, grid, food,
+  // water, synapse points) ignores lights entirely, so this only changes
+  // how the fly itself looks, nothing else.
+  scene.add(new THREE.HemisphereLight(0x8fd9ff, 0x14241c, 0.6));
+  const flyKeyLight = new THREE.DirectionalLight(0xfff2d9, 0.9);
+  flyKeyLight.position.set(4, 8, 6);
+  scene.add(flyKeyLight);
 
   const gridColor = 0x1c5a3a;
   scene.add(new THREE.GridHelper(200, 40, gridColor, gridColor));
@@ -434,11 +630,16 @@
     };
   }
 
-  // ---- fly anatomy: a reusable factory, since we now need 3 flies on
-  // screen (this fly + tick.world.other_flies) instead of one. Every
-  // material stays wireframe:true, matching the rest of the scene's unlit
-  // aesthetic -- "activity glow" is always faked via color brightness /
-  // opacity, never a real light (same trick the food pulse already used).
+  // ---- fly anatomy: the real DeepMind/HHMI Janelia flybody mesh (see
+  // frontend/assets/flybody/SOURCE.md + README.md's Attribution section),
+  // replacing the old primitive-shapes factory. Lit MeshStandardMaterial
+  // now (not the rest of the scene's unlit wireframe look) because these
+  // ~200k real triangles per fly only read as anatomy under real shading --
+  // see the two lights added below, scoped to the fly via material choice
+  // alone (MeshBasicMaterial elsewhere, city/food/water/synapse points,
+  // ignores lights entirely, so nothing else in the scene changes look).
+  // "Activity glow" is still color + emissive brightness, same trick as
+  // before, just genuinely emissive now instead of faked via opacity.
   function col(hex) { return new THREE.Color(hex); }
 
   // dim/bright color pairs per body part. Only fly 0 (the controlled fly)
@@ -455,116 +656,201 @@
   };
 
   function makeMat(color, opacity) {
-    return new THREE.MeshBasicMaterial({ color, wireframe: true, transparent: true, opacity: opacity == null ? 0.55 : opacity });
+    const c = color instanceof THREE.Color ? color : new THREE.Color(color);
+    return new THREE.MeshStandardMaterial({
+      color: c.clone(), roughness: 0.8, metalness: 0.05,
+      transparent: true, opacity: opacity == null ? 0.95 : opacity,
+      emissive: c.clone().multiplyScalar(0.12),
+    });
   }
 
-  // an elongated, tapered outline (quadratic-curve Shape) instead of a bare
-  // rectangle, so the wireframe actually reads as a wing. Scaled down (0.45)
-  // so a wingspan (both wings, tip to tip) comes out close to the thorax's
-  // own length -- a fly wing, not a moth/dragonfly wing.
-  function makeWingGeometry() {
-    const s = 0.45;
-    const shape = new THREE.Shape();
-    shape.moveTo(0, 0);
-    shape.quadraticCurveTo(0.35 * s, 0.18 * s, 0.95 * s, 0.06 * s);
-    shape.quadraticCurveTo(1.15 * s, 0, 0.95 * s, -0.14 * s);
-    shape.quadraticCurveTo(0.4 * s, -0.22 * s, 0, 0);
-    return new THREE.ShapeGeometry(shape, 8);
+  // ---- real mesh loading: every part below is a real, unmodified (only
+  // axis-remapped/recentered/scaled as a whole) .obj vendored from
+  // assets/flybody/ -- see SOURCE.md there for exactly what was kept, what
+  // was dropped and why, and how the left/right mirroring works. Loaded
+  // ONCE, geometries shared across all 3 fly instances (same principle as
+  // the old wingGeo/legGeo shared-geometry pattern), never per-instance.
+  const FLYBODY_BASE = "assets/flybody/";
+
+  // [fileBaseName, bucket, mirrorForRightSide]
+  //   bucket: which parts{} array (driveFlyRegions' target) this belongs
+  //   to, or "thorax" (per-fly body color), "wing" (flap-animated, not
+  //   region-driven -- old primitive wing wasn't either), or "neutral"
+  //   (structural only, not region-driven -- matches the old primitive
+  //   head, which was a static gray sphere never touched by driveFlyRegions).
+  const FLYBODY_MANIFEST = [
+    ["abdomen_1_body", "abdomen", false], ["abdomen_1_lower", "abdomen", false],
+    ["abdomen_2_body", "abdomen", false], ["abdomen_2_lower", "abdomen", false],
+    ["abdomen_3_body", "abdomen", false], ["abdomen_3_lower", "abdomen", false],
+    ["abdomen_4_body", "abdomen", false], ["abdomen_4_lower", "abdomen", false],
+    ["abdomen_5_body", "abdomen", false], ["abdomen_5_lower", "abdomen", false],
+    ["abdomen_6_body", "abdomen", false], ["abdomen_6_lower", "abdomen", false],
+    ["abdomen_7_body", "abdomen", false], ["abdomen_7_lower", "abdomen", false],
+    ["abdomen_8_body", "abdomen", false],
+    ["antenna_left_body", "antennae", true],
+    ["coxa_T1_left_body", "legs", true], ["coxa_T2_left_body", "legs", true], ["coxa_T3_left_body", "legs", true],
+    ["femur_T1_left_body", "legs", true], ["femur_T2_left_body", "legs", true], ["femur_T3_left_body", "legs", true],
+    ["haltere_left_body", "neutral", true],
+    ["haustellum_body", "proboscis", false],
+    ["head_body", "neutral", false],
+    ["head_ocelli", "neutral", false],
+    ["head_red", "eyes", true], // the real compound eyes -- see SOURCE.md for how that was confirmed
+    ["labrum_left_lower", "proboscis", true],
+    ["rostrum_body", "proboscis", false],
+    ["tarsal_claw_T1_left_brown", "legs", true], ["tarsal_claw_T2_left_brown", "legs", true], ["tarsal_claw_T3_left_brown", "legs", true],
+    ["tarsus_T1_1_left_body", "legs", true], ["tarsus_T1_2_left_body", "legs", true], ["tarsus_T1_3_left_body", "legs", true], ["tarsus_T1_4_left_body", "legs", true],
+    ["tarsus_T2_1_left_body", "legs", true], ["tarsus_T2_2_left_body", "legs", true], ["tarsus_T2_3_left_body", "legs", true], ["tarsus_T2_4_left_body", "legs", true],
+    ["tarsus_T3_1_left_body", "legs", true], ["tarsus_T3_2_left_body", "legs", true], ["tarsus_T3_3_left_body", "legs", true], ["tarsus_T3_4_left_body", "legs", true],
+    ["thorax_body", "thorax", false],
+    ["tibia_T1_left_body", "legs", true], ["tibia_T2_left_body", "legs", true], ["tibia_T3_left_body", "legs", true],
+    ["wing_left_membrane", "wing", true],
+  ];
+
+  // every kept file's vertices share ONE common coordinate frame (the
+  // model's assembled rest pose, confirmed by comparing bounding-box
+  // centers across parts before writing this) with axes (X=front/back,
+  // negative=front; Y=left/right, negative=the "left" side vendored here;
+  // Z=up/down) -- remapped once, per geometry, to this scene's own
+  // convention (X=side, Y=up, Z=forward, positive=heading direction) via
+  // one fixed orthogonal swap (newX=-oldY, newY=oldZ, newZ=-oldX; a pure
+  // rotation, determinant +1, verified before relying on it -- no separate
+  // normal-matrix computation needed, the same swap is correct for normals
+  // too), then recentered on the real thorax_body.obj's own bounding-box
+  // center (computed once, offline, from the vendored .obj files -- not a
+  // guess) so the assembled group's local origin sits at the body center,
+  // matching how `group.position`/`camera.lookAt` already treat it
+  // elsewhere in this file, then scaled to roughly this scene's existing
+  // fly-sized world units.
+  const FLYBODY_RECENTER = new THREE.Vector3(0, -1.185466, -0.067064);
+  const FLYBODY_SCALE = 0.85;
+
+  function remapFlybodyGeometry(geometry) {
+    const pos = geometry.attributes.position;
+    for (let i = 0; i < pos.count; i++) {
+      const x = pos.getX(i), y = pos.getY(i), z = pos.getZ(i);
+      pos.setXYZ(i, -y, z, -x);
+    }
+    pos.needsUpdate = true;
+    const nor = geometry.attributes.normal;
+    if (nor) {
+      for (let i = 0; i < nor.count; i++) {
+        const nx = nor.getX(i), ny = nor.getY(i), nz = nor.getZ(i);
+        nor.setXYZ(i, -ny, nz, -nx);
+      }
+      nor.needsUpdate = true;
+    }
+    geometry.translate(FLYBODY_RECENTER.x, FLYBODY_RECENTER.y, FLYBODY_RECENTER.z);
+    geometry.scale(FLYBODY_SCALE, FLYBODY_SCALE, FLYBODY_SCALE);
+    geometry.computeBoundingBox();
+    return geometry;
   }
-  const wingGeo = makeWingGeometry();
-  const legGeo = new THREE.CylinderGeometry(0.025, 0.045, 0.62, 4);
-  const antennaGeo = new THREE.CylinderGeometry(0.015, 0.05, 0.38, 4);
-  const eyeGeo = new THREE.SphereGeometry(0.11, 8, 6);
+
+  const flybodyGeometries = {}; // fileBaseName -> shared, finalized BufferGeometry
+  const flybodyObjLoader = new THREE.OBJLoader();
+
+  function loadFlybodyPart(name, onProgress) {
+    return fetch(FLYBODY_BASE + name + ".obj")
+      .then((r) => {
+        if (!r.ok) throw new Error("flybody asset fetch failed: " + name + " (" + r.status + ")");
+        return r.text();
+      })
+      .then((text) => {
+        const container = flybodyObjLoader.parse(text);
+        const mesh = container.children[0];
+        flybodyGeometries[name] = remapFlybodyGeometry(mesh.geometry);
+        if (onProgress) onProgress();
+      });
+  }
+
+  // fetches + parses every real mesh part exactly once; resolves once every
+  // shared geometry is ready to be cloned/reused across all 3 fly instances.
+  function loadFlybodyAssets(onProgress) {
+    return Promise.all(FLYBODY_MANIFEST.map((entry) => loadFlybodyPart(entry[0], onProgress)));
+  }
+
+  // a wing needs to flap around its real hinge (the body-side edge), not
+  // around the geometry's own local origin -- so it's wrapped in a small
+  // pivot Group positioned at that hinge, with the wing mesh offset back
+  // inside it; rotating the pivot (not the mesh) then flaps correctly.
+  // After the shared remap, the vendored ("left") wing sits on the
+  // positive local-X side, so its hinge (nearest the body) is its
+  // minimum-X edge and its tip is its maximum-X edge.
+  function addMirroredWingPivots(group, geometry) {
+    const bb = geometry.boundingBox;
+    const hinge = new THREE.Vector3(bb.min.x, (bb.min.y + bb.max.y) / 2, (bb.min.z + bb.max.z) / 2);
+    const wingMat = new THREE.MeshStandardMaterial({
+      color: 0x8fb4cc, roughness: 0.35, metalness: 0.05, side: THREE.DoubleSide,
+      transparent: true, opacity: 0.45, depthWrite: false,
+    });
+
+    const pivotL = new THREE.Group();
+    pivotL.position.copy(hinge);
+    const meshL = new THREE.Mesh(geometry, wingMat);
+    meshL.position.copy(hinge).multiplyScalar(-1);
+    pivotL.add(meshL);
+    group.add(pivotL);
+
+    const pivotR = new THREE.Group();
+    pivotR.position.set(-hinge.x, hinge.y, hinge.z);
+    pivotR.scale.x = -1;
+    const meshR = new THREE.Mesh(geometry, wingMat);
+    meshR.position.copy(hinge).multiplyScalar(-1);
+    pivotR.add(meshR);
+    group.add(pivotR);
+
+    return { left: pivotL, right: pivotR };
+  }
 
   // createFlyMesh(bodyColor) -> { group, parts, wingL, wingR }
   //   group: the THREE.Group to add to the scene / position+rotate each tick
   //   parts: { eyes, antennae, thorax, abdomen, legs, proboscis } -> arrays
-  //          of MeshBasicMaterial, for driveFlyRegions() to color per-tick
-  //   wingL/wingR: mesh refs, for the wing-flap animation
+  //          of MeshStandardMaterial, for driveFlyRegions() to color per-tick
+  //   wingL/wingR: pivot-Group refs, for the wing-flap animation (rotating
+  //   a Group works identically to the old code's rotating a Mesh directly)
   function createFlyMesh(bodyColor) {
     const group = new THREE.Group();
     const parts = { eyes: [], antennae: [], thorax: [], abdomen: [], legs: [], proboscis: [] };
+    let wingL = null, wingR = null;
 
-    function add(geo, mat, pos, rot, scale) {
-      const m = new THREE.Mesh(geo, mat);
-      if (pos) m.position.set(pos[0], pos[1], pos[2]);
-      if (rot) m.rotation.set(rot[0], rot[1], rot[2]);
-      if (scale) m.scale.set(scale[0], scale[1], scale[2]);
-      group.add(m);
-      return m;
-    }
+    for (const [name, bucket, mirror] of FLYBODY_MANIFEST) {
+      const geo = flybodyGeometries[name];
+      if (!geo) continue; // shouldn't happen -- loadFlybodyAssets() always resolves first
 
-    // thorax: main body mass -- where wings and legs attach. z-scale kept
-    // modest (1.15, not 1.35) so its front edge (~0.58) sits well clear of
-    // the head cluster instead of poking into it.
-    const thoraxMat = makeMat(bodyColor);
-    add(new THREE.SphereGeometry(0.42, 8, 6), thoraxMat, [0, 0, 0.1], [0, 0, 0], [1, 0.85, 1.15]);
-    parts.thorax.push(thoraxMat);
+      if (bucket === "wing") {
+        const pivots = addMirroredWingPivots(group, geo);
+        wingL = pivots.left;
+        wingR = pivots.right;
+        continue;
+      }
 
-    // abdomen: tapering cone behind the thorax, its wide base overlapping
-    // just into the thorax's (now shorter) rear edge for a connected look.
-    const abdomenMat = makeMat(PART_COLORS.abdomen.dim);
-    add(new THREE.ConeGeometry(0.36, 1.5, 8), abdomenMat, [0, -0.02, -1.0], [-Math.PI / 2, 0, 0]);
-    parts.abdomen.push(abdomenMat);
+      const mat =
+        bucket === "thorax" ? makeMat(bodyColor) :
+        bucket === "neutral" ? makeMat(0x555555, 0.9) :
+        makeMat(PART_COLORS[bucket].dim);
 
-    // head: small sphere, pushed clear in front of the thorax (thorax's own
-    // front edge is ~0.58) so it reads as a separate, distinct head instead
-    // of a tangle of overlapping wireframes at the body's front. headZ=0.95
-    // (not 0.88) widens the thorax-to-head gap to ~0.15 units -- the
-    // previous 0.08 gap was numerically real but visually invisible once
-    // the (oversized) eyes bridged the two, see eyeGeo's comment.
-    const headZ = 0.95;
-    const headMat = makeMat(0x555555);
-    add(new THREE.SphereGeometry(0.22, 8, 6), headMat, [0, 0.05, headZ]);
+      const mesh = new THREE.Mesh(geo, mat);
+      group.add(mesh);
+      if (bucket !== "neutral") parts[bucket].push(mat);
 
-    // eyes: bulge from the sides of the head like real compound eyes, but
-    // sized clearly smaller than the head itself (radius 0.11 vs the
-    // head's 0.22) so they read as two distinct lobes, not a second sphere
-    // nearly engulfing the head -- that was the actual cause of the
-    // tangled-blob look, not the thorax/head gap.
-    for (const side of [-1, 1]) {
-      const m = makeMat(PART_COLORS.eyes.dim);
-      add(eyeGeo, m, [side * 0.27, 0.07, headZ + 0.03]);
-      parts.eyes.push(m);
-    }
-
-    // antennae: thin cones angled forward off the head.
-    for (const side of [-1, 1]) {
-      const m = makeMat(PART_COLORS.antennae.dim);
-      add(antennaGeo, m, [side * 0.1, 0.24, headZ + 0.17], [0.95, 0, side * 0.3]);
-      parts.antennae.push(m);
-    }
-
-    // proboscis/mouth: small cone at the front of the head, pointing
-    // down/forward -- driven directly by food_activity, not a region.
-    const proboscisMat = makeMat(PART_COLORS.proboscis.dim);
-    add(new THREE.ConeGeometry(0.06, 0.26, 6), proboscisMat, [0, -0.11, headZ + 0.07], [2.3, 0, 0]);
-    parts.proboscis.push(proboscisMat);
-
-    // legs: 3 pairs of straight cylinder segments off the thorax underside.
-    const legZ = [0.27, -0.04, -0.33];
-    const legTiltX = [-0.35, 0, 0.35];
-    for (let i = 0; i < 3; i++) {
-      for (const side of [-1, 1]) {
-        const m = makeMat(PART_COLORS.legs.dim);
-        add(legGeo, m, [side * 0.38, -0.3, legZ[i]], [legTiltX[i], 0, -side * 0.6]);
-        parts.legs.push(m);
+      if (mirror) {
+        // same material instance as its real counterpart, so activity
+        // coloring (which only ever touches the material) applies to both
+        // sides identically -- this mirrored copy is real geometry, just
+        // reflected, not a fabricated approximation (see SOURCE.md).
+        const mirrorMesh = new THREE.Mesh(geo, mat);
+        mirrorMesh.scale.x = -1;
+        group.add(mirrorMesh);
       }
     }
-
-    // wings: one geometry, mirrored via scale.x for the left side. Attached
-    // close to the body centerline (0.16, not 0.26) so, combined with the
-    // shrunk geometry above, tip-to-tip span comes out comparable to the
-    // thorax's own length rather than 2-3x the body width.
-    const wingMat = new THREE.MeshBasicMaterial({ color: 0xffd35a, wireframe: true, side: THREE.DoubleSide, transparent: true, opacity: 0.7 });
-    const wingR = add(wingGeo, wingMat, [0.16, 0.32, 0.05]);
-    const wingL = add(wingGeo, wingMat, [-0.16, 0.32, 0.05], null, [-1, 1, 1]);
 
     return { group, parts, wingL, wingR };
   }
 
   // ---- 3 flies: fly 0 (controlled, red, region-driven) + 2 others
-  // (position/heading/action/wing_state only, from tick.world.other_flies) ----
+  // (position/heading/action/wing_state only, from tick.world.other_flies).
+  // Built once the real mesh assets finish loading (see loadFlybodyAssets
+  // call near the bottom of this file) -- `flies` stays empty until then,
+  // guarded at every read site (renderHud, animate, the camera). ----
   const FLY_COLORS = [0xff5a5a, 0x7fa8c9, 0xb98fd1];
   const THORAX_COLORS_BY_FLY = FLY_COLORS.map((hex) => {
     const bright = new THREE.Color(hex);
@@ -572,24 +858,28 @@
     return { dim, bright };
   });
   const flies = [];
-  for (let i = 0; i < 3; i++) {
-    const built = createFlyMesh(FLY_COLORS[i]);
-    const inst = {
-      id: i,
-      group: built.group,
-      parts: built.parts,
-      wingL: built.wingL,
-      wingR: built.wingR,
-      wingFlap: 0,
-      action: "idle",
-      wingState: "folded",
-      targetPos: { x: i === 0 ? 0 : (i === 1 ? 2 : -2), z: i === 0 ? 0 : (i === 1 ? 2 : -2) },
-    };
-    inst.group.position.set(inst.targetPos.x, 1.2, inst.targetPos.z);
-    scene.add(inst.group);
-    flies.push(inst);
+  let fly0 = null;
+
+  function buildFlies() {
+    for (let i = 0; i < 3; i++) {
+      const built = createFlyMesh(FLY_COLORS[i]);
+      const inst = {
+        id: i,
+        group: built.group,
+        parts: built.parts,
+        wingL: built.wingL,
+        wingR: built.wingR,
+        wingFlap: 0,
+        action: "idle",
+        wingState: "folded",
+        targetPos: { x: i === 0 ? 0 : (i === 1 ? 2 : -2), z: i === 0 ? 0 : (i === 1 ? 2 : -2) },
+      };
+      inst.group.position.set(inst.targetPos.x, 1.2, inst.targetPos.z);
+      scene.add(inst.group);
+      flies.push(inst);
+    }
+    fly0 = flies[0];
   }
-  const fly0 = flies[0];
 
   // fly 0's real position/heading/action/wing_state (tick.motor_state), or
   // an other fly's real position/heading/action/wing_state
@@ -612,7 +902,11 @@
     _tmpColor.copy(colors.dim).lerp(colors.bright, v);
     for (const m of mats) {
       m.color.copy(_tmpColor);
-      m.opacity = 0.3 + v * 0.6;
+      m.opacity = 0.35 + v * 0.6;
+      // real emissive glow now (was opacity-only, faked, back when every
+      // material was an unlit wireframe) -- active parts genuinely light
+      // up under the fly's own key light, not just look more opaque.
+      if (m.emissive) m.emissive.copy(_tmpColor).multiplyScalar(0.12 + v * 0.9);
     }
   }
   function driveFlyRegions(instance, regionMap, foodActivityValue) {
@@ -708,11 +1002,20 @@
     // orbit close enough that the fly and its anatomy are actually legible
     // (was 28-38 units out -- a few pixels on screen at that range, no
     // amount of geometry detail reads at that distance) while still
-    // swinging past some city buildings for atmosphere.
-    camera.position.x = Math.sin(performance.now() / 20000) * 6;
-    camera.position.y = 6;
-    camera.position.z = 10 + Math.cos(performance.now() / 20000) * 3;
-    camera.lookAt(fly0.group.position);
+    // swinging past some city buildings for atmosphere. Skippable
+    // (test-harness only, see the FLYBREAK_DEBUG hook above) so a
+    // Playwright close-up can hold the camera still after positioning it
+    // itself -- otherwise this every-frame reset would clobber that on
+    // the very next animation frame, before the screenshot is taken.
+    if (!window.__flybreak_freeze_camera) {
+      camera.position.x = Math.sin(performance.now() / 20000) * 6;
+      camera.position.y = 6;
+      camera.position.z = 10 + Math.cos(performance.now() / 20000) * 3;
+      // fly0 doesn't exist until the real mesh assets finish loading (see
+      // loadFlybodyAssets below) -- until then just keep looking at the
+      // origin, same as the camera's own initial lookAt() above.
+      camera.lookAt(fly0 ? fly0.group.position : ORIGIN);
+    }
 
     renderer.render(scene, camera);
   }
@@ -724,7 +1027,39 @@
     renderer.setSize(window.innerWidth, window.innerHeight);
   });
 
+  // test-harness-only introspection hook, off unless explicitly opted into
+  // before this script runs (e.g. window.FLYBREAK_DEBUG = true via
+  // page.addInitScript in a Playwright test) -- never touches app behavior.
+  if (window.FLYBREAK_DEBUG) {
+    window.__flybreak = { scene, camera, renderer, flies, THREE };
+  }
+
+  // real-time HUD/synapse-map/WS wiring starts immediately -- none of it
+  // depends on the fly mesh. The real flybody mesh (~81 MB of real .obj
+  // geometry, see assets/flybody/SOURCE.md) loads in parallel; the 3 fly
+  // instances are only built, and the loading overlay only hidden, once
+  // every part has actually arrived -- no half-built fly shown mid-stream.
   connect();
+
+  const meshLoadingEl = document.getElementById("mesh-loading");
+  const meshLoadingBar = document.getElementById("mesh-loading-bar");
+  let flybodyLoadedCount = 0;
+  loadFlybodyAssets(() => {
+    flybodyLoadedCount++;
+    meshLoadingBar.style.width = Math.round((flybodyLoadedCount / FLYBODY_MANIFEST.length) * 100) + "%";
+  })
+    .then(() => {
+      buildFlies();
+      meshLoadingEl.classList.add("hidden");
+      // if a tick already arrived while the mesh was still loading, apply
+      // it now instead of waiting for the next one to arrive -- otherwise
+      // the fly would sit in its default idle pose for up to ~1 real tick.
+      if (latest) renderHud(latest);
+    })
+    .catch((err) => {
+      console.error("flybody mesh failed to load", err);
+      meshLoadingEl.querySelector("div").textContent = "fly anatomy failed to load (see console)";
+    });
 })();
 </script>
 </body>

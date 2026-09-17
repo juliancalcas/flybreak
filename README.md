@@ -150,13 +150,16 @@ needed.
 ### `frontend/` -- the visualization
 
 `index.html` -- one self-contained page (Three.js from a CDN, everything
-else inline), no build step. Connects to
+else inline except the real fly mesh under `assets/flybody/`, fetched
+not vendored -- see "The flybody mesh" and Attribution below), no build
+step. Connects to
 `ws://<host>:8765` (override with
 `window.FLYBREAK_WS_URL` before the script runs, or open it through any
-static server), renders a wireframe city + the fly, and a HUD (tick,
-sim_time, spike count, firing rate, per-region activity bars, action, wing
-state, and the `mood_level` slider -- see below). Open it directly in a
-browser, or serve it:
+static server), renders a wireframe city + a real, anatomically-detailed
+fly mesh (region-activity-driven coloring on the controlled fly), and a
+HUD (tick, sim_time, spike count, firing rate, per-region activity bars,
+action, wing state, the `mood_level` slider, and a glowing volumetric
+synapse-map panel -- see below). Open it directly in a browser, or serve it:
 
 ```bash
 python -m http.server 8080 --directory frontend
@@ -466,14 +469,43 @@ channel behind both landmarks, a fixed 3-fly population with no breeding
 and no real "meeting" behavior beyond proximity -- and the fear channel
 stays unwired regardless.
 
-## Attribution
+## The flybody mesh
 
-`frontend/index.html` does not currently vendor `fly-connectome-template`
-(Mert Cobanov) -- see `HANDOFF.md` if still open, or the git log for how
-that was resolved. If/when its MaleCNS atlas or Flybody mesh is pulled in,
-its source-available license requires crediting the template both in this
-project's UI and in this README; re-check the exact license text before
-that happens, and before anything from this project is ever made public.
+`frontend/index.html`'s fly mesh is the real anatomically-detailed
+*Drosophila melanogaster* body model built by Google DeepMind and HHMI
+Janelia Research Campus, sourced directly from
+[`google-deepmind/mujoco_menagerie`](https://github.com/google-deepmind/mujoco_menagerie/tree/main/flybody)
+(itself taken with permission from the official
+[`TuragaLab/flybody`](https://github.com/TuragaLab/flybody) repository) --
+**not** through the `fly-connectome-template` (Mert Cobanov) wrapper that
+an earlier version of this note flagged as a possible source. That
+distinction matters licensing-wise: `fly-connectome-template`'s own
+source-available license is more restrictive and covers only Cobanov's UI/
+template code, not the flybody mesh itself, which is independently
+licensed Apache-2.0 by its own authors regardless of who redistributes it.
+
+Same reasoning as the connectome data below: 49 real `.obj` files, ~81 MB
+combined, real third-party binaries with their own provenance -- too
+heavy for git and not this project's own work, so `fetch_flybody.py`
+downloads them once per machine (`python -m engine.fetch_flybody`,
+also run automatically by `python __main__.py`/`run.bat` on first launch
+if missing) into `frontend/assets/flybody/`, gitignored except
+`SOURCE.md` and this section. `frontend/assets/flybody/SOURCE.md`
+documents exactly which of the upstream 85 `.obj` files (~134 MB) were
+kept, which were left out and why (decorative bristle/pigment overlay
+layers, confirmed pure-black in the source MJCF's own material table,
+not guessed from filenames), and how the left/right mirroring works
+(bilaterally symmetric parts are fetched once and mirrored at runtime via
+negative X-scale, not duplicated). Licensed Apache-2.0 (`LICENSE`,
+fetched alongside the mesh, vendored unmodified as the license requires)
+-- credited in the app's own UI (the small credit line at the
+bottom-left of the HUD) as well as here.
+
+> Vaxenburg, R., Siwanowicz, I., Merel, J. *et al.* Whole-body physics
+> simulation of fruit fly locomotion. *Nature* **643**, 1312-1320 (2025).
+> https://doi.org/10.1038/s41586-025-09029-4
+
+## Attribution
 
 The connectome data itself (`engine/data/`, fetched not vendored) is MIT
 licensed via `solomonsealed/flybrain`, built on the FlyWire Consortium's
