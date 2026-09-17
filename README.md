@@ -102,7 +102,11 @@ python -m engine.server            # ws://127.0.0.1:8765, one shared World (3 fl
 - `schema_v1.json` -- JSON Schema for one tick, matching the shape agreed
   in the project brief (`schema_version`, `tick`, `sim_time_ms`,
   `stimulus`, `activity`, `motor_state`, `meta`, `world`). Currently
-  `"1.4"` -- bumped from `"1.3"` when top-level `world.other_flies`
+  `"1.5"` -- bumped from `"1.4"` when `activity.sample_spikes` (array of
+  local sample-graph ids that spiked this tick) was added, alongside the
+  new, separate `schema_graph_v1.json` for the one-time `synapse_graph`
+  message (see "The live synapse sample" below). `"1.4"` was bumped from
+  `"1.3"` when top-level `world.other_flies`
   (array of `{id, position, heading_deg, action, wing_state}`) was added,
   giving a viewer visibility into the other flies sharing its fly's world
   (see "Where this is headed" -- "Multiple flies"); the existing
@@ -114,14 +118,18 @@ python -m engine.server            # ws://127.0.0.1:8765, one shared World (3 fl
   was added, which itself was bumped from `"1.0"` when
   `stimulus.bac_level` was renamed to `stimulus.mood_level` (see "The
   mood_level stimulus").
-- `validator.py` -- `validate_tick()` / `is_valid_tick()`, used by both the
-  real engine and the mock stream so neither can silently drift from the
-  schema.
-- `mock_server.py` -- serves synthetic but schema-valid ticks on the same
-  port/message shape as the real engine, for frontend-only iteration
+- `validator.py` -- `validate_tick()` / `is_valid_tick()` for a tick, and
+  `validate_graph()` / `is_valid_graph()` for the one-time `synapse_graph`
+  message, used by both the real engine and the mock stream so neither can
+  silently drift from either schema.
+- `mock_server.py` -- serves synthetic but schema-valid ticks (plus one
+  synthetic `synapse_graph` message per connection) on the same port/
+  message shape as the real engine, for frontend-only iteration
   (its region names are hardcoded to match the real engine's actual
-  `super_class` categories, since the mock has no connectome data to
-  discover them from):
+  `super_class` categories, and its `synapse_graph` is a small fixed
+  ring-plus-chords graph, clearly not real connectivity -- see its own
+  comments -- since the mock has no connectome data to discover or sample
+  from):
 
 ```bash
 python -m contract.mock_server  # ws://127.0.0.1:8765, no LIF sim involved
@@ -207,6 +215,63 @@ when another fly is nearby (`World`'s shared multi-fly space -- see
 shape at `server.py`'s own `_SOCIAL_RANGE`/`_SOCIAL_BOOST`. Unlike the
 food/water gradient, this needs no contact-vs-distance caveat: vision is
 a genuine distance sense in the real fly.
+
+## The live synapse sample
+
+139,255 neurons and ~2.7M synapses cannot be rendered as a literal
+node-link graph in a browser at 20 Hz -- both computationally (a fresh
+139,255-node force layout every tick is nowhere near real-time) and
+visually (that many edges drawn at once is an undifferentiated black
+mass, not a picture anyone could read). So the frontend instead gets a
+real, small, connected piece of the real connectome, not the whole thing
+and not a fabricated stand-in.
+
+`network.get_sample_graph()` builds it once per process (`@lru_cache`,
+same pattern as `_load_connectome`), via real snowball/BFS sampling: seed
+neurons are the first 20 real neuron indices (sorted ascending, no RNG)
+from each of `net.motor_mask`/`net.food_mask`/`net.visual_mask` -- the
+same three real populations `server.py` already reads every tick -- then
+BFS expands outward along the real edges in `w`, in both directions
+(who feeds a node, and who a node feeds), until the sample reaches a
+target size, hard-capped at 250 nodes. Measured on the real connectome as
+it stands today: **250 nodes, 986 directed edges** among them (the BFS
+frontier reached the 250-node cap before naturally running out of real
+neighbors to add). Every node is a real neuron with a real `super_class`
+region and the real `is_food`/`is_motor`/`is_visual` flags straight from
+those same masks; every edge's `weight` is a real, unmodified entry read
+directly out of the already-computed `w` matrix (`w[post, pre]`, same
+units/sign convention as the rest of this codebase -- see "The real
+connectome" above), not recomputed from the raw CSVs and not invented.
+
+Sent to a connecting client exactly once, right when it connects (before
+the per-tick loop starts), as `{"type": "synapse_graph", "nodes": [...],
+"edges": [...]}` -- structurally tagged with `"type"` so the frontend can
+tell it apart from a regular tick (which has no `"type"` field). Since
+every fly in the shared `World` reads the same cached connectome/`w` (see
+`LIFNetwork.__init__`/`_load_connectome` -- only each fly's own membrane
+state differs), this one sample is identical for every fly and every
+client for the lifetime of the process; it is computed once and reused,
+never rebuilt per connection or per tick. Validated against its own
+schema, `contract/schema_graph_v1.json`, via `validate_graph()`/
+`is_valid_graph()` -- the same pattern as `validate_tick()`/
+`is_valid_tick()`, kept as a separate schema because a graph message and
+a tick message are structurally different things sent at different
+cadences, not two shapes of the same thing.
+
+Every tick after that, fly 0's payload additionally carries
+`activity.sample_spikes` -- the LOCAL sample ids (matching the
+`synapse_graph` message's node `id`s, so the frontend never has to
+translate) that actually spiked *this specific tick*, read straight out
+of the real per-tick spike vector `LIFNetwork.step()` already computes,
+via a server-side-only mapping from local sample id back to real
+connectome index (never sent to the client). Typically a handful to a
+few dozen ids out of the ~250 sampled neurons, matching this project's
+own measured firing rates elsewhere -- never the full 139,255-length
+spike vector. Same "no neural introspection into a fly you don't
+control" boundary the rest of this project already follows for
+`activity`/`stimulus`: only fly 0 (the one a connecting browser controls)
+ever has its `sample_spikes` actually forwarded to a client, via the same
+`_build_client_payload` that already keeps `world.other_flies` minimal.
 
 ## The mood_level stimulus
 

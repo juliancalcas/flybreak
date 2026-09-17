@@ -103,9 +103,14 @@ def warm_cache() -> None:
     asyncio event loop instead of before it starts serving, it blocks
     every connection -- not just the one that triggered it -- for the
     whole load. See server.py's `main()`, which calls this before
-    `websockets.serve()`.
+    `websockets.serve()`. Also forces `get_sample_graph()`'s one-time BFS
+    sample-build now, for the same reason -- it is cheap (a few hundred
+    nodes' worth of sparse-matrix slicing) next to the connectome load
+    itself, but still synchronous work that should happen before, not
+    during, the first client's connection.
     """
     _load_connectome()
+    get_sample_graph()
 
 
 @dataclass(frozen=True)
@@ -234,3 +239,129 @@ class LIFNetwork:
         """Fraction of each region's neurons that spiked this tick."""
         return {r: float(spikes[mask].mean()) if mask.any() else 0.0
                 for r, mask in self._region_masks.items()}
+
+
+# --- Live "synapse map" sample subgraph -------------------------------
+#
+# 139,255 neurons / ~2.7M synapses cannot be rendered as a literal
+# node-link graph in a browser at 20 Hz -- it would be both
+# computationally and visually meaningless (a solid black mass of
+# edges). get_sample_graph() instead builds one small, REAL, connected
+# induced subgraph via snowball/BFS sampling along the actual edges in
+# `w`: every node here is a real neuron (a real row/column index into
+# the real connectome), every edge is a real `w[post, pre]` entry --
+# nothing here is invented, in the same spirit as README.md's "Where
+# this is headed" correction of the earlier fabricated
+# OLF_ORN_FOOD/OLF_ORN_DANGER names.
+#
+# Seeds are the first _SAMPLE_SEED_PER_POPULATION real neuron indices
+# (ascending by real connectome index, i.e. `np.where(mask)[0]` is
+# already sorted -- no RNG anywhere in this function) from each of
+# motor_mask/food_mask/visual_mask -- the same three real populations
+# server.py already reads every tick for motor_state/food_activity/the
+# conspecific-proximity boost, so the sample is centered on neurons this
+# project's own behavior already depends on, not an arbitrary corner of
+# the data.
+#
+# From those seeds, BFS expands along REAL structural neighbors in both
+# directions -- `w`'s row (this neuron as postsynaptic, i.e. who feeds
+# it) and `w`'s column (this neuron as presynaptic, i.e. who it feeds)
+# -- until the sample reaches _SAMPLE_TARGET_NODES nodes (hard-capped at
+# _SAMPLE_MAX_NODES). Every step is fully deterministic (sorted seeds,
+# sorted neighbor traversal order, no `np.random` anywhere here), so
+# within one process's lifetime get_sample_graph() always returns the
+# identical sample -- see tests/test_engine.py's
+# test_sample_graph_is_deterministic_within_a_process. It is only
+# guaranteed identical *within* one running process (the same guarantee
+# `_load_connectome`'s cache already relies on for `w` itself), not
+# across restarts -- which is all server.py needs: one shared World, one
+# `w`, so one sample reused for every fly and every client connection
+# for that process's lifetime.
+_SAMPLE_SEED_PER_POPULATION = 20
+_SAMPLE_TARGET_NODES = 200
+_SAMPLE_MAX_NODES = 250
+
+
+@lru_cache(maxsize=1)
+def get_sample_graph() -> dict:
+    """Real snowball-sampled sub-network of the real connectome -- see the
+    module comment above for how and why.
+
+    Returns {"nodes": [...], "edges": [...], "sample_real_index": ndarray}.
+    "nodes"/"edges" are exactly what server.py sends to a client as the
+    one-time "synapse_graph" message (see _handle_client): each node is
+    {"id": <0..N-1 local index>, "region": <real super_class string>,
+    "is_food"/"is_motor"/"is_visual": <bool, straight from the real
+    net.food_mask/motor_mask/visual_mask>}; each edge is {"source",
+    "target": <local ids>, "weight": <real signed w entry, same units as
+    network.py's `w`>}. "sample_real_index" (local sample id -> real
+    connectome neuron index, kept server-side only, never sent to a
+    client) is what server.py uses each tick to look up which of this
+    sample's neurons actually spiked -- see Simulation.step()'s
+    "sample_spikes".
+    """
+    c = _load_connectome()
+    # Column access for "who does this neuron feed" (successors) -- `w`
+    # itself is CSR (row = post, see _load_connectome's comment), which
+    # only gives fast row (predecessor) access on its own.
+    w_csc = c.w.tocsc()
+
+    def seeds_from(mask: np.ndarray) -> list:
+        return np.where(mask)[0][:_SAMPLE_SEED_PER_POPULATION].tolist()
+
+    ordered_seeds = (seeds_from(c.motor_mask) + seeds_from(c.food_mask)
+                      + seeds_from(c.visual_mask))
+    sample: list = []
+    sample_set: set = set()
+    for s in ordered_seeds:
+        if s not in sample_set:
+            sample_set.add(s)
+            sample.append(s)
+
+    frontier = list(sample)
+    while frontier and len(sample) < _SAMPLE_TARGET_NODES:
+        next_frontier = []
+        for node in frontier:
+            preds = c.w.indices[c.w.indptr[node]:c.w.indptr[node + 1]]        # who feeds `node`
+            succs = w_csc.indices[w_csc.indptr[node]:w_csc.indptr[node + 1]]  # who `node` feeds
+            for nb in sorted(set(preds.tolist()) | set(succs.tolist())):
+                if nb not in sample_set:
+                    sample_set.add(nb)
+                    sample.append(nb)
+                    next_frontier.append(nb)
+                    if len(sample) >= _SAMPLE_MAX_NODES:
+                        break
+            if len(sample) >= _SAMPLE_MAX_NODES:
+                break
+        frontier = next_frontier
+
+    # Sorted ascending by real connectome index -- local id `i` is simply
+    # this array's position, a deterministic, arbitrary-but-fixed
+    # relabeling of the sampled real indices, independent of the BFS
+    # discovery order above.
+    sample_real_index = np.array(sorted(sample), dtype=np.int64)
+
+    nodes = [
+        {
+            "id": i,
+            "region": str(c.region_of[real_i]),
+            "is_food": bool(c.food_mask[real_i]),
+            "is_motor": bool(c.motor_mask[real_i]),
+            "is_visual": bool(c.visual_mask[real_i]),
+        }
+        for i, real_i in enumerate(sample_real_index.tolist())
+    ]
+
+    # The real (source, target, weight) edges among exactly this node
+    # set, sliced straight out of the already-computed `w` -- a small
+    # (<=250 x <=250) dense-ish sub-slice, not recomputed from the raw
+    # CSVs. `sub[a, b] = w[sample_real_index[a], sample_real_index[b]] =
+    # w[post=a, pre=b]` (see `w`'s own row/col convention), so an edge
+    # runs from local id b (pre) to local id a (post).
+    sub = c.w[sample_real_index, :][:, sample_real_index].tocoo()
+    edges = [
+        {"source": int(pre_local), "target": int(post_local), "weight": float(weight)}
+        for post_local, pre_local, weight in zip(sub.row.tolist(), sub.col.tolist(), sub.data.tolist())
+    ]
+
+    return {"nodes": nodes, "edges": edges, "sample_real_index": sample_real_index}

@@ -1,0 +1,39 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "contract/schema_graph_v1.json",
+  "title": "FlyBreak synapse_graph",
+  "type": "object",
+  "required": ["type", "nodes", "edges"],
+  "additionalProperties": false,
+  "properties": {
+    "type": { "const": "synapse_graph" },
+    "nodes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "region", "is_food", "is_motor", "is_visual"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "type": "integer", "minimum": 0 },
+          "region": { "type": "string", "minLength": 1 },
+          "is_food": { "type": "boolean" },
+          "is_motor": { "type": "boolean" },
+          "is_visual": { "type": "boolean" }
+        }
+      }
+    },
+    "edges": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["source", "target", "weight"],
+        "additionalProperties": false,
+        "properties": {
+          "source": { "type": "integer", "minimum": 0 },
+          "target": { "type": "integer", "minimum": 0 },
+          "weight": { "type": "number" }
+        }
+      }
+    }
+  }
+}

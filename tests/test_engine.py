@@ -5,7 +5,7 @@ import pytest
 
 from contract.validator import validate_tick
 from engine.mood import MoodController
-from engine.network import LIFNetwork, data_available
+from engine.network import LIFNetwork, data_available, get_sample_graph
 from engine.server import (
     FOOD_POSITION,
     N_FLIES,
@@ -390,3 +390,127 @@ def test_simulation_handle_control_overrides_mood_level():
 
     sim.handle_control({"type": "set_mood_mode", "value": "auto"})
     assert sim.mood.mode == "auto"
+
+
+# --- Live "synapse map" sample subgraph (network.get_sample_graph) --------
+
+@requires_connectome
+def test_sample_graph_is_deterministic_within_a_process():
+    """Calling get_sample_graph() twice must return the identical
+    structure -- both via its own lru_cache (same object) and, more
+    strongly, algorithmically (cache_clear()'d and rebuilt from scratch),
+    since server.py relies on one consistent sample for every fly and
+    every client connection for the lifetime of a running process (see
+    network.py's get_sample_graph comment)."""
+    g1 = get_sample_graph()
+    g2 = get_sample_graph()
+    assert g1 is g2  # lru_cache(maxsize=1)
+
+    get_sample_graph.cache_clear()
+    g3 = get_sample_graph()
+    assert g3["nodes"] == g1["nodes"]
+    assert g3["edges"] == g1["edges"]
+    assert np.array_equal(g3["sample_real_index"], g1["sample_real_index"])
+    get_sample_graph.cache_clear()
+    get_sample_graph()  # restore the cache other tests may rely on
+
+
+@requires_connectome
+def test_sample_graph_size_in_expected_range():
+    """~150-250 nodes -- large enough to look like a real network, small
+    enough to render live in a browser (see README.md's live-synapse-
+    sample section for why the full 139,255/~2.7M-synapse connectome
+    cannot be)."""
+    graph = get_sample_graph()
+    assert 150 <= len(graph["nodes"]) <= 250
+    assert len(graph["edges"]) > 0
+
+
+@requires_connectome
+def test_sample_graph_node_ids_are_contiguous_local_indices():
+    graph = get_sample_graph()
+    ids = [n["id"] for n in graph["nodes"]]
+    assert ids == list(range(len(graph["nodes"])))
+
+
+@requires_connectome
+def test_sample_graph_edge_weights_match_real_w_matrix():
+    """Every sampled edge's weight is the ACTUAL w[post, pre] entry it
+    claims to represent, not just some plausible-looking number -- checked
+    directly against the real connectome's own `w` via the sample's
+    real-neuron-index mapping."""
+    net = LIFNetwork(seed=0)
+    graph = get_sample_graph()
+    sample_real_index = graph["sample_real_index"]
+    assert len(sample_real_index) == len(graph["nodes"])
+
+    checked = 0
+    for edge in graph["edges"]:
+        real_pre = int(sample_real_index[edge["source"]])
+        real_post = int(sample_real_index[edge["target"]])
+        real_weight = float(net.w[real_post, real_pre])
+        assert real_weight == pytest.approx(edge["weight"], abs=1e-5)
+        checked += 1
+    assert checked == len(graph["edges"])
+    assert checked > 0
+
+
+@requires_connectome
+def test_sample_graph_nodes_flags_match_real_masks():
+    """is_food/is_motor/is_visual on every sampled node come straight from
+    the real net.food_mask/motor_mask/visual_mask, not re-derived some
+    other way."""
+    net = LIFNetwork(seed=0)
+    graph = get_sample_graph()
+    sample_real_index = graph["sample_real_index"]
+    for node in graph["nodes"]:
+        real_i = int(sample_real_index[node["id"]])
+        assert node["is_food"] == bool(net.food_mask[real_i])
+        assert node["is_motor"] == bool(net.motor_mask[real_i])
+        assert node["is_visual"] == bool(net.visual_mask[real_i])
+        assert node["region"] == str(net.region_of[real_i])
+
+
+@requires_connectome
+def test_sample_graph_seeded_from_real_motor_food_visual_populations():
+    """The sample is centered on the same real populations server.py
+    already reads every tick (net.motor_mask/food_mask/visual_mask), not
+    an arbitrary/unrelated corner of the data -- at least some sampled
+    nodes must carry each flag."""
+    net = LIFNetwork(seed=0)
+    graph = get_sample_graph()
+    assert any(n["is_food"] for n in graph["nodes"])
+    assert any(n["is_motor"] for n in graph["nodes"])
+    assert any(n["is_visual"] for n in graph["nodes"])
+
+
+@requires_connectome
+def test_simulation_sample_spikes_ids_always_valid():
+    """activity.sample_spikes only ever contains valid local sample ids
+    (0 <= id < sample size) -- never a stray real connectome index or an
+    out-of-range value."""
+    sample_size = len(get_sample_graph()["nodes"])
+    sim = Simulation(seed=5)
+    for _ in range(80):
+        payload = sim.step()
+        ids = payload["activity"]["sample_spikes"]
+        assert all(isinstance(i, int) for i in ids)
+        assert all(0 <= i < sample_size for i in ids)
+
+
+@requires_connectome
+def test_simulation_sample_spikes_sometimes_non_empty():
+    """Guards against a silently-broken wiring: over a real run, at least
+    SOME ticks must report a non-empty sample_spikes -- always-empty would
+    mean the real-index mapping (or the sample itself) is disconnected
+    from the network's actual spiking, not that the sample legitimately
+    never fires (given this project's own measured firing rates, see
+    server.py's EMA comments -- a ~150-250 neuron sample sitting idle for
+    80 straight ticks would be implausible)."""
+    sim = Simulation(seed=5)
+    any_non_empty = False
+    for _ in range(80):
+        payload = sim.step()
+        if payload["activity"]["sample_spikes"]:
+            any_non_empty = True
+    assert any_non_empty

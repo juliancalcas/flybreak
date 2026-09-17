@@ -17,11 +17,11 @@ import numpy as np
 import websockets
 from websockets.asyncio.server import ServerConnection
 
-from contract.validator import validate_tick
+from contract.validator import validate_graph, validate_tick
 from engine.mood import MoodController
-from engine.network import LIFNetwork, warm_cache
+from engine.network import LIFNetwork, get_sample_graph, warm_cache
 
-SCHEMA_VERSION = "1.4"
+SCHEMA_VERSION = "1.5"
 TICK_HZ = 20
 DT_MS = 1000.0 / TICK_HZ
 
@@ -223,6 +223,12 @@ class Simulation:
         self._motor_ema = None
         self._food_ema = None
         self._rng = np.random.default_rng(seed)
+        # local sample id -> real connectome neuron index, for
+        # "sample_spikes" below -- see network.get_sample_graph's own
+        # docstring. Fetched once here (get_sample_graph is itself
+        # lru_cache(maxsize=1), so this is just a dict lookup, not a
+        # recompute) rather than every tick.
+        self._sample_real_index = get_sample_graph()["sample_real_index"]
 
     def step(self, peer_positions: list[tuple[float, float]] | None = None) -> dict:
         """Advances one tick.
@@ -300,6 +306,16 @@ class Simulation:
         region_activity = self.net.region_activity(spikes)
         spike_count = int(spikes.sum())
         firing_rate_hz = spike_count / self.net.n * TICK_HZ
+
+        # Real, live spikes for just the "synapse_graph" sample (see
+        # network.get_sample_graph) -- the LOCAL sample ids (0..N_sample-1,
+        # matching that one-time message's node ids) that actually spiked
+        # THIS tick, looked up from the real per-tick `spikes` vector above
+        # via the sample's real-neuron-index mapping. Typically a handful
+        # to a few dozen out of ~200-250 sampled neurons, given this
+        # network's own measured firing rates (see README.md/this module's
+        # other EMA comments) -- never the full 139,255-length vector.
+        sample_spikes = np.nonzero(spikes[self._sample_real_index])[0].tolist()
 
         # the real "motor" super_class is tiny (110 of 139,255 neurons) --
         # the combined motor+descending pathway (net.motor_mask) is what
@@ -390,6 +406,7 @@ class Simulation:
                 "firing_rate_hz": firing_rate_hz,
                 "active_regions": [{"region": r, "activity": region_activity[r]} for r in self.net.regions],
                 "food_activity": food_activity,
+                "sample_spikes": sample_spikes,
             },
             "motor_state": {
                 "action": action,
@@ -534,6 +551,20 @@ async def _tick_world(world: World) -> None:
 
 
 async def _handle_client(ws: ServerConnection, world: World) -> None:
+    # The real snowball-sampled synapse subgraph (see network.py's
+    # get_sample_graph) is identical for every fly and every client --
+    # the underlying connectome/weights `w` are shared, cached once per
+    # process (see LIFNetwork.__init__ / _load_connectome; only each
+    # fly's own membrane state differs). So it is sent exactly once, right
+    # here, before the per-tick loop below -- not re-sent every tick like
+    # a regular payload, and structurally tagged with "type":
+    # "synapse_graph" so the frontend can tell it apart from a tick
+    # (which has no "type" field).
+    graph = get_sample_graph()
+    graph_message = {"type": "synapse_graph", "nodes": graph["nodes"], "edges": graph["edges"]}
+    validate_graph(graph_message)
+    await ws.send(json.dumps(graph_message))
+
     reader_task = asyncio.create_task(_read_controls(ws, world))
     last_tick_sent = -1
     try:
