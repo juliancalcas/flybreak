@@ -1,6 +1,7 @@
 """FlyBreak engine: ticks the real FlyWire connectome and streams
-contract-shaped JSON over WebSocket. One fly (one Simulation) per
-connected client.
+contract-shaped JSON over WebSocket. One shared World of N_FLIES flies
+(see World's docstring), ticked once regardless of client count; each
+connecting client controls world.flies[0] and watches all of them.
 
 Run from the repo root with: python -m engine.server
 (requires `python -m engine.fetch_connectome` to have been run once on
@@ -20,7 +21,7 @@ from contract.validator import validate_tick
 from engine.mood import MoodController
 from engine.network import LIFNetwork, warm_cache
 
-SCHEMA_VERSION = "1.3"
+SCHEMA_VERSION = "1.4"
 TICK_HZ = 20
 DT_MS = 1000.0 / TICK_HZ
 
@@ -51,8 +52,9 @@ _MOTOR_EMA_ALPHA = 0.1
 # this replaces the earlier, fabricated `OLF_ORN_FOOD` olfactory label,
 # which did not actually exist in the real data.
 #
-# FOOD_POSITION is the one fixed food source in the (as-yet wall-less,
-# single-fly) world -- (x, z) on the same ground plane the fly's own
+# FOOD_POSITION is one of the two fixed attractant sources in the
+# (as-yet wall-less, boundary-less) shared world every fly lives in (see
+# World below) -- (x, z) on the same ground plane every fly's own
 # (self._x, self._z) live on. It must match frontend/index.html's food
 # prop exactly (`food.position.set(6, 1.4, 5)`; the frontend's y=1.4 is
 # just the prop's height off the ground and has no engine-side analog).
@@ -60,6 +62,31 @@ _MOTOR_EMA_ALPHA = 0.1
 # literal is the one that must be kept in lockstep with it, not the
 # reverse.
 FOOD_POSITION = (6.0, 5.0)  # (x, z)
+
+# WATER_POSITION: the second static landmark in the world, driving the
+# SAME net.food_mask population as FOOD_POSITION, through the SAME
+# distance-gradient shape -- not a second, independent "water" channel.
+# This is a deliberate, honest constraint, not a shortcut: FlyWire's own
+# classification has exactly ONE real, identity-labeled appetitive taste
+# channel in this dataset (`class == "gustatory"`, `sub_class ==
+# "sugar/water"`, 129 neurons -- see network.py's FOOD_CLASS/
+# FOOD_SUB_CLASS comment). It does not separately distinguish sugar- from
+# water-sensing at this level of the real data. Inventing a second,
+# independent "water" neuron population to attach WATER_POSITION to would
+# be exactly the kind of fabrication this project already corrected once
+# (README.md's OLF_ORN_FOOD/OLF_ORN_DANGER story -- names that sounded
+# plausible but did not exist in the real classification.csv.gz). The
+# honest design instead: both landmarks are real "the fly is near a real
+# attractant" signals, and both drive the one real channel the data
+# actually supports (see `proximity = max(...)` below, not summed).
+#
+# Chosen ~7.8 units from spawn (0, 0) -- the same distance as
+# FOOD_POSITION (sqrt(6^2 + 5^2) = 7.81, sqrt((-6)^2 + (-5)^2) = 7.81) --
+# so neither landmark starts closer to the fly than the other, and in the
+# diagonally opposite quadrant (-x, -z vs. FOOD_POSITION's +x, +z) so the
+# two are visually distinct and never overlap. Both stay well inside
+# frontend/index.html's nearest ring of wireframe buildings (radius 15+).
+WATER_POSITION = (-6.0, -5.0)  # (x, z)
 
 # _FOOD_BOOST is now the boost's FULL strength, only reached at/very near
 # FOOD_POSITION -- see the proximity scaling below. Real gustatory
@@ -73,7 +100,8 @@ FOOD_POSITION = (6.0, 5.0)  # (x, z)
 # food-drive grows as it nears food" without inventing a whole separate
 # sensory pathway that would need its own real, identity-labeled neuron
 # population to attach to (this dataset's `class == "olfactory"`
-# sub-populations carry no food identity -- see README.md).
+# sub-populations carry no food identity -- see README.md). WATER_POSITION
+# reuses this exact same boost/range pair -- see its own comment above.
 #
 # _FOOD_RANGE sets the falloff: an exponential (proximity =
 # exp(-distance / _FOOD_RANGE)), chosen over e.g. inverse-square because
@@ -97,8 +125,12 @@ FOOD_POSITION = (6.0, 5.0)  # (x, z)
 # indistinguishable from the ~0.25-0.29 no-boost/no-food baseline this
 # same channel had before the gradient existed. So a full trajectory
 # (see tests/test_engine.py) sees food_activity swing across roughly that
-# same ~0.22-0.65 span as the fly moves toward and orbits FOOD_POSITION,
-# not a step function -- see test_food_gradient_scales_with_distance.
+# same ~0.22-0.65 span as the fly moves toward and orbits whichever
+# landmark it's closest to, not a step function -- see
+# test_food_gradient_scales_with_distance. Since WATER_POSITION reuses
+# the exact same boost/range/mask, a fly spawned equidistant-ish from
+# both landmarks (as it is at (0,0) -- both are ~7.81 units away) sees
+# this same range regardless of which one it ends up approaching.
 _FOOD_BOOST = 2.0
 _FOOD_RANGE = 8.0
 _FOOD_EMA_ALPHA = 0.1
@@ -122,21 +154,56 @@ _FOOD_EMA_ALPHA = 0.1
 _POSITION_STEP = 0.15
 
 # Chemotaxis-like steering bias (see README.md, "Where this is headed" --
-# "A world"): nudges heading toward the true bearing to FOOD_POSITION
-# each tick, on top of (not instead of) the existing stochastic wander
-# and mood-driven wobble below. Strength scales with food_activity, which
-# is itself now proximity-gated (see _FOOD_RANGE above) -- so the pull is
-# only strong once the fly has genuinely picked up food-drive, and stays
-# small at the ~0.22-0.24 baseline food_activity sits at with no food
-# nearby (see _FOOD_RANGE's comment for the measured distance sweep),
-# letting the fly wander close to undirected until it is actually within
-# scent range. 0.35 is picked so that at food_activity's near-food peak
+# "A world"): nudges heading toward the true bearing to whichever of
+# FOOD_POSITION/WATER_POSITION currently has the higher proximity (see
+# `target` below, chosen fresh each tick) -- on top of (not instead of)
+# the existing stochastic wander and mood-driven wobble below. Strength
+# scales with food_activity, which is itself now proximity-gated (see
+# _FOOD_RANGE above) -- so the pull is only strong once the fly has
+# genuinely picked up food-drive, and stays small at the ~0.22-0.24
+# baseline food_activity sits at with no attractant nearby (see
+# _FOOD_RANGE's comment for the measured distance sweep), letting the fly
+# wander close to undirected until it is actually within scent range of
+# one of the two. 0.35 is picked so that at food_activity's near-food peak
 # (~0.6-0.65) and a maximal 180 degree heading/bearing mismatch, the bias
 # contributes up to ~40 degrees/tick -- comparable to or larger than the
 # existing wander/wobble terms, enough to reliably win out and turn the
-# fly toward food once it is close, without ever fully overriding them
-# (it is added to, not substituted for, the stochastic terms).
+# fly toward whichever landmark it's closer to once it is close, without
+# ever fully overriding them (it is added to, not substituted for, the
+# stochastic terms).
 _FOOD_STEER_GAIN = 0.35
+
+# Conspecific ("another fly is visibly nearby") boost -- see network.py's
+# VISUAL_SUPER_CLASSES comment for why this is legitimately a distance
+# sense, unlike the food/water gradient above. net.visual_mask is huge
+# (85,557 of 139,255 neurons -- optic is most of the fly's brain, as in
+# the real animal), so a boost anywhere near _FOOD_BOOST's magnitude
+# (2.0) would saturate it and distort the rest of the network's dynamics;
+# _SOCIAL_BOOST is picked much smaller than _FOOD_BOOST for exactly that
+# reason.
+#
+# Empirically measured (same methodology as _FOOD_BOOST/_FOOD_RANGE: 60-
+# tick runs, seed 0, first 10 ticks dropped as warm-up, LIFNetwork driven
+# directly at a fixed peer distance): visual_mask's per-tick spike
+# fraction is ~0.272-0.274 with no peer nearby (distance>=15, proximity
+# <0.05) -- the same ~0.27-0.29 baseline this channel already sits at
+# unboosted -- rising to ~0.289 at distance=5 (proximity=0.37, one
+# _SOCIAL_RANGE away), ~0.309 at distance=2 (proximity=0.67), and ~0.344
+# at distance=0 (proximity=1.0, full _SOCIAL_BOOST) -- a small but real
+# and monotonic gradient, not a no-op. Confirmed separately that this
+# boost does not meaningfully perturb the motor+descending pathway's own
+# calibration (net.motor_mask activity measured at ~0.425-0.431 across
+# _SOCIAL_BOOST=0.0 to 1.0, well inside the tick-to-tick noise
+# _MOTOR_EMA_ALPHA already smooths over -- see its comment), so
+# _MOTOR_ACTIVITY_MIN/MAX needed no retuning for this.
+#
+# _SOCIAL_RANGE=5.0 (shorter than _FOOD_RANGE=8.0, deliberately -- "notice
+# a conspecific" is meant to read as closer-range than "smell a landmark
+# from across the world," not identical to it) uses the same exponential
+# falloff shape as food/water for the same reason (bounded, no
+# singularity at distance=0).
+_SOCIAL_BOOST = 0.6
+_SOCIAL_RANGE = 5.0
 
 
 class Simulation:
@@ -157,7 +224,18 @@ class Simulation:
         self._food_ema = None
         self._rng = np.random.default_rng(seed)
 
-    def step(self) -> dict:
+    def step(self, peer_positions: list[tuple[float, float]] | None = None) -> dict:
+        """Advances one tick.
+
+        `peer_positions` is an optional list of OTHER flies' (x, z)
+        positions, as of the end of the previous tick (see World.step()'s
+        two-pass comment) -- used only to compute this fly's own
+        conspecific-proximity drive boost (see _SOCIAL_BOOST/
+        _SOCIAL_RANGE). A standalone Simulation (no World, the existing
+        single-fly usage this project has always had) passes nothing, so
+        this fly senses no peers -- Simulation remains independently
+        constructible/steppable/testable exactly as before.
+        """
         self.mood.advance(DT_MS)
         mood_level = self.mood.level
 
@@ -181,9 +259,39 @@ class Simulation:
         # far did that food-drive just steer the heading" both read the
         # same position.
         food_distance = math.hypot(self._x - FOOD_POSITION[0], self._z - FOOD_POSITION[1])
+        water_distance = math.hypot(self._x - WATER_POSITION[0], self._z - WATER_POSITION[1])
         food_proximity = math.exp(-food_distance / _FOOD_RANGE)
+        water_proximity = math.exp(-water_distance / _FOOD_RANGE)
+        # max(), not summed -- see WATER_POSITION's comment. net.food_mask
+        # is one real taste-receptor population; a real receptor
+        # population saturates on whichever stimulus is currently
+        # strongest, it does not sum two simultaneous, independently-
+        # sensed distant sources into a stronger-than-either signal. This
+        # also keeps the boost's own range identical to the single-
+        # landmark version (still exp(-d/_FOOD_RANGE) in [0,1]) -- the
+        # near/far numbers measured in _FOOD_RANGE's comment above still
+        # hold unchanged with two landmarks instead of one.
+        proximity = max(food_proximity, water_proximity)
         drive = self._rng.normal(0.15 + mood_level * 0.15, 0.1, size=self.net.n).astype(np.float32)
-        drive[self.net.food_mask] += _FOOD_BOOST * food_proximity
+        drive[self.net.food_mask] += _FOOD_BOOST * proximity
+
+        # Conspecific ("another fly nearby") boost -- see _SOCIAL_BOOST/
+        # _SOCIAL_RANGE's comment. Uses the nearest peer only (min, not
+        # sum/mean across all peers), same saturating-receptor logic as
+        # food/water's max() above -- one visual system responding to
+        # "is there a conspecific close by," not one signal per peer
+        # stacking additively. peer_positions is the previous tick's
+        # snapshot (see the docstring above), never this tick's -- so this
+        # boost, like food/water's, reads a position from strictly before
+        # any of this tick's movement.
+        if peer_positions:
+            nearest_peer_distance = min(
+                math.hypot(self._x - px, self._z - pz) for px, pz in peer_positions
+            )
+            social_proximity = math.exp(-nearest_peer_distance / _SOCIAL_RANGE)
+        else:
+            social_proximity = 0.0
+        drive[self.net.visual_mask] += _SOCIAL_BOOST * social_proximity
 
         spikes = self.net.step(DT_MS, drive, motor_threshold_scale=motor_threshold_scale)
         self.tick += 1
@@ -234,18 +342,27 @@ class Simulation:
         # version had.
         wobble = (1.0 - mood_level) * self._rng.normal(0, 25)
 
-        # Chemotaxis-like steering bias toward FOOD_POSITION -- see
-        # _FOOD_STEER_GAIN's comment. bearing_to_food uses the same
-        # sin(heading)=dx, cos(heading)=dz convention the position update
-        # below moves in, via atan2(dx, dz) (not the more usual
-        # atan2(dz, dx)) so a heading exactly equal to this bearing walks
-        # straight at the food. steer is a signed nudge toward that
-        # bearing along the shorter arc (wrapped to [-180, 180)) and is
-        # added alongside, never instead of, the stochastic terms above.
-        food_dx = FOOD_POSITION[0] - self._x
-        food_dz = FOOD_POSITION[1] - self._z
-        bearing_to_food = math.degrees(math.atan2(food_dx, food_dz)) % 360
-        angular_diff = ((bearing_to_food - self._heading + 180) % 360) - 180
+        # Chemotaxis-like steering bias toward whichever of FOOD_POSITION/
+        # WATER_POSITION is currently winning (higher proximity) -- see
+        # _FOOD_STEER_GAIN's comment. Ties (exact at spawn, where both
+        # landmarks sit at the same ~7.81-unit distance) favor food, an
+        # arbitrary but deterministic tie-break so the very first tick's
+        # bias doesn't depend on floating-point noise; whichever landmark
+        # the fly drifts toward first then stays strictly closer (its own
+        # proximity keeps rising as the other's falls), so it keeps
+        # winning on every subsequent tick -- no oscillation between the
+        # two once broken. target_bearing uses the same sin(heading)=dx,
+        # cos(heading)=dz convention the position update below moves in,
+        # via atan2(dx, dz) (not the more usual atan2(dz, dx)) so a
+        # heading exactly equal to this bearing walks straight at the
+        # target. steer is a signed nudge toward that bearing along the
+        # shorter arc (wrapped to [-180, 180)) and is added alongside,
+        # never instead of, the stochastic terms above.
+        target = FOOD_POSITION if food_proximity >= water_proximity else WATER_POSITION
+        target_dx = target[0] - self._x
+        target_dz = target[1] - self._z
+        bearing_to_target = math.degrees(math.atan2(target_dx, target_dz)) % 360
+        angular_diff = ((bearing_to_target - self._heading + 180) % 360) - 180
         steer = angular_diff * _FOOD_STEER_GAIN * food_activity
 
         self._heading = (self._heading + self._rng.normal(2, 5) + wobble + steer) % 360
@@ -282,6 +399,16 @@ class Simulation:
                 "position": {"x": self._x, "z": self._z},
             },
             "meta": {"status": "running", "notes": ""},
+            # A standalone Simulation has no visibility into other flies'
+            # full render state (action/wing_state/etc -- it only ever
+            # receives bare peer *positions*, for the visual-proximity
+            # drive boost above). World assembles the real other_flies
+            # list for the client-facing payload from the sibling
+            # Simulations' own step() outputs -- see World.step() and
+            # server.py's _handle_client. Schema "1.4" requires this key
+            # to be present on every tick regardless, so it defaults to
+            # empty here rather than being conditionally omitted.
+            "world": {"other_flies": []},
         }
 
     def handle_control(self, message: dict) -> None:
@@ -292,23 +419,137 @@ class Simulation:
             self.mood.release_to_auto()
 
 
-async def _read_controls(ws: ServerConnection, sim: Simulation) -> None:
+# Fixed, small population of flies sharing ONE world (see README.md,
+# "Where this is headed" -- "Multiple flies"). Index 0 is the one a
+# connecting browser controls (its mood_level set/override routes to
+# world.flies[0], exactly as the single-fly version always worked);
+# indices 1..N_FLIES-1 are fully autonomous -- nothing ever calls
+# set_manual on their MoodControllers, they just auto-ramp forever. This
+# deliberately avoids needing any multi-viewer claiming/allocation system
+# (out of scope, not asked for) while still giving the controlled fly real
+# company: autonomous flies are still genuinely "otras de su especie,"
+# just not player-controlled ones. 3 is small enough that every fly's
+# step() (peer-distance loop over N_FLIES-1 others) stays negligible next
+# to the ~5-13ms/tick the underlying LIFNetwork.step() already costs per
+# fly (see README.md's "The real connectome" -- N_FLIES-1 hypot() calls
+# per fly per tick is nothing next to a 139,255-neuron sparse matmul).
+N_FLIES = 3
+
+
+class World:
+    """The one shared simulated space every fly and every connected
+    viewer lives in together (see README.md, "Where this is headed" --
+    "Multiple flies"). Ticked once, continuously, by a single background
+    task in main() -- independent of how many browser tabs are connected,
+    so autonomous flies keep living with nobody watching. Owns N_FLIES
+    independent `Simulation`s; `Simulation` itself stays the well-tested,
+    independently-usable single-fly building block it already was -- World
+    only adds the shared tick and the peer-position exchange between them.
+    """
+
+    def __init__(self, n_flies: int = N_FLIES, seeds: list[int] | None = None):
+        # distinct seeds so the N_FLIES flies don't all move identically
+        # despite sharing a spawn point -- see Simulation.__init__'s
+        # (0.0, 0.0) spawn comment; all flies born at the same point, like
+        # siblings, then wander apart under their own independent rng.
+        # `seeds` defaults to 0..n_flies-1 (what main() actually runs);
+        # tests pass other seed sets to check the "flies do end up near
+        # each other" empirical claim isn't a one-seed fluke.
+        seeds = list(range(n_flies)) if seeds is None else seeds
+        self.flies = [Simulation(seed=s) for s in seeds]
+        self.latest_payloads: list[dict] | None = None
+
+    def step(self) -> list[dict]:
+        """Ticks every fly once, together. Two-pass, as README.md/the
+        design brief requires: (a) snapshot every fly's position as of
+        the END of the previous tick, BEFORE any fly moves this tick,
+        then (b) give each fly that fixed snapshot (all peers, i.e. every
+        OTHER fly) so its own drive/steering for this tick is computed
+        against a single consistent world-state, not one that's already
+        half-updated by whichever fly happened to step first.
+        """
+        snapshot = [(f._x, f._z) for f in self.flies]
+        payloads = []
+        for i, fly in enumerate(self.flies):
+            peers = [pos for j, pos in enumerate(snapshot) if j != i]
+            payloads.append(fly.step(peer_positions=peers))
+        self.latest_payloads = payloads
+        return payloads
+
+    def handle_control(self, message: dict) -> None:
+        """Routes a connecting client's control message to the ONE fly it
+        controls (index 0) -- see N_FLIES' comment. Flies 1..N_FLIES-1
+        never receive control messages; their MoodControllers just
+        auto-ramp forever.
+        """
+        self.flies[0].handle_control(message)
+
+
+def _build_client_payload(payloads: list[dict]) -> dict:
+    """Builds the tick a connecting client actually receives: fly 0's own
+    full payload (stimulus/activity/motor_state/meta -- unchanged shape,
+    see README.md's "minimize churn to the existing single-fly contract"),
+    with `world.other_flies` filled in from the OTHER flies' own most
+    recent payloads -- id, position, heading_deg, action, wing_state only
+    (see schema_v1.json's "world" definition -- a viewer isn't meant to
+    have neural introspection into flies it doesn't control, just enough
+    to render them moving around realistically).
+    """
+    payload = dict(payloads[0])
+    payload["world"] = {
+        "other_flies": [
+            {
+                "id": i,
+                "position": p["motor_state"]["position"],
+                "heading_deg": p["motor_state"]["heading_deg"],
+                "action": p["motor_state"]["action"],
+                "wing_state": p["motor_state"]["wing_state"],
+            }
+            for i, p in enumerate(payloads) if i != 0
+        ]
+    }
+    return payload
+
+
+async def _read_controls(ws: ServerConnection, world: World) -> None:
     async for raw in ws:
         try:
-            sim.handle_control(json.loads(raw))
+            world.handle_control(json.loads(raw))
         except (json.JSONDecodeError, KeyError, ValueError, TypeError):
             pass  # a malformed control message from one client must not kill the tick loop
 
 
-async def _handle_client(ws: ServerConnection) -> None:
-    sim = Simulation()
-    reader_task = asyncio.create_task(_read_controls(ws, sim))
+async def _tick_world(world: World) -> None:
+    """The single background task that steps the shared World, at the
+    same TICK_HZ the engine has always run at -- runs continuously from
+    the moment main() starts it, regardless of whether any client is
+    connected, so the autonomous flies (indices 1..N_FLIES-1) keep living
+    with nobody watching. Client connections (_handle_client below) only
+    ever READ world.latest_payloads; they never step the world themselves
+    anymore -- see README.md, "Where this is headed".
+    """
+    while True:
+        world.step()
+        await asyncio.sleep(DT_MS / 1000.0)
+
+
+async def _handle_client(ws: ServerConnection, world: World) -> None:
+    reader_task = asyncio.create_task(_read_controls(ws, world))
+    last_tick_sent = -1
     try:
         while True:
-            payload = sim.step()
-            validate_tick(payload)
-            await ws.send(json.dumps(payload))
-            await asyncio.sleep(DT_MS / 1000.0)
+            payloads = world.latest_payloads
+            if payloads is not None and payloads[0]["tick"] != last_tick_sent:
+                out = _build_client_payload(payloads)
+                validate_tick(out)
+                await ws.send(json.dumps(out))
+                last_tick_sent = payloads[0]["tick"]
+            # Polls faster than the tick rate so a client picks up each
+            # new tick promptly without resending a stale/duplicate one
+            # while waiting on the background task above -- the world's
+            # own stepping cadence (DT_MS) is what actually paces ticks,
+            # this is just how often a client re-checks for a new one.
+            await asyncio.sleep(DT_MS / 1000.0 / 4)
     finally:
         reader_task.cancel()
 
@@ -316,9 +557,15 @@ async def _handle_client(ws: ServerConnection) -> None:
 async def main(host: str = "127.0.0.1", port: int = 8765) -> None:
     print("Loading the real FlyWire connectome (139,255 neurons, ~10-15s, once)...")
     warm_cache()
-    async with websockets.serve(_handle_client, host, port):
-        print(f"FlyBreak engine listening on ws://{host}:{port}")
-        await asyncio.Future()
+    world = World()
+    tick_task = asyncio.create_task(_tick_world(world))
+    try:
+        async with websockets.serve(lambda ws: _handle_client(ws, world), host, port):
+            print(f"FlyBreak engine listening on ws://{host}:{port} "
+                  f"({N_FLIES} flies sharing one world)")
+            await asyncio.Future()
+    finally:
+        tick_task.cancel()
 
 
 if __name__ == "__main__":

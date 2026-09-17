@@ -55,8 +55,33 @@ def _mock_tick(tick: int, sim_time_ms: float, mood_level: float) -> dict:
     # frontend built against this mock, without pretending to model
     # anything.
     position = {"x": math.cos(t * 0.05) * 5.0, "z": math.sin(t * 0.05) * 5.0}
+    # plausible stand-in for World.other_flies (see server.py's World/
+    # N_FLIES=3 -- schema "1.4") -- the mock has no World/Simulation
+    # instances for the other two flies either, so these two just wander
+    # independently in their own slow circles (different phase/radius/
+    # speed each, so they visibly don't move in lockstep with fly 0 or
+    # each other), same spirit as `position` above: realistic-looking, not
+    # modeling anything.
+    other_fly_1_action = "walking" if (math.sin(t * 0.4) + 1) / 2 > 0.4 else "idle"
+    other_fly_2_action = "flying" if (math.sin(t * 0.25 + 1.0) + 1) / 2 > 0.65 else "walking"
+    other_flies = [
+        {
+            "id": 1,
+            "position": {"x": math.cos(t * 0.08 + 2.0) * 4.0, "z": math.sin(t * 0.08 + 2.0) * 4.0},
+            "heading_deg": (t * 15 + 90) % 360,
+            "action": other_fly_1_action,
+            "wing_state": "buzzing" if other_fly_1_action == "flying" else "folded",
+        },
+        {
+            "id": 2,
+            "position": {"x": math.cos(t * 0.04 + 4.5) * 6.0, "z": math.sin(t * 0.04 + 4.5) * 6.0},
+            "heading_deg": (t * 25 + 200) % 360,
+            "action": other_fly_2_action,
+            "wing_state": "raised" if other_fly_2_action == "flying" else "folded",
+        },
+    ]
     return {
-        "schema_version": "1.3",
+        "schema_version": "1.4",
         "tick": tick,
         "sim_time_ms": sim_time_ms,
         "stimulus": {"mood_level": mood_level, "other_inputs": {}},
@@ -74,6 +99,7 @@ def _mock_tick(tick: int, sim_time_ms: float, mood_level: float) -> dict:
             "position": position,
         },
         "meta": {"status": "running", "notes": "mock stream"},
+        "world": {"other_flies": other_flies},
     }
 
 

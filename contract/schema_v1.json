@@ -3,10 +3,10 @@
   "$id": "contract/schema_v1.json",
   "title": "FlyBreak tick",
   "type": "object",
-  "required": ["schema_version", "tick", "sim_time_ms", "stimulus", "activity", "motor_state", "meta"],
+  "required": ["schema_version", "tick", "sim_time_ms", "stimulus", "activity", "motor_state", "meta", "world"],
   "additionalProperties": false,
   "properties": {
-    "schema_version": { "const": "1.3" },
+    "schema_version": { "const": "1.4" },
     "tick": { "type": "integer", "minimum": 0 },
     "sim_time_ms": { "type": "number", "minimum": 0 },
     "stimulus": {
@@ -67,6 +67,36 @@
       "properties": {
         "status": { "type": "string", "enum": ["decompressing", "running", "paused", "error"] },
         "notes": { "type": "string" }
+      }
+    },
+    "world": {
+      "type": "object",
+      "required": ["other_flies"],
+      "additionalProperties": false,
+      "properties": {
+        "other_flies": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "position", "heading_deg", "action", "wing_state"],
+            "additionalProperties": false,
+            "properties": {
+              "id": { "type": "integer", "minimum": 0 },
+              "position": {
+                "type": "object",
+                "required": ["x", "z"],
+                "additionalProperties": false,
+                "properties": {
+                  "x": { "type": "number" },
+                  "z": { "type": "number" }
+                }
+              },
+              "heading_deg": { "type": "number", "minimum": 0, "exclusiveMaximum": 360 },
+              "action": { "type": "string", "enum": ["idle", "walking", "grooming", "flying", "frozen"] },
+              "wing_state": { "type": "string", "enum": ["folded", "raised", "buzzing"] }
+            }
+          }
+        }
       }
     }
   }

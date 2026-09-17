@@ -4,7 +4,7 @@ import pytest
 from contract.validator import is_valid_tick, validate_tick
 
 VALID_TICK = {
-    "schema_version": "1.3",
+    "schema_version": "1.4",
     "tick": 4821,
     "sim_time_ms": 300,
     "stimulus": {"mood_level": 0.72, "other_inputs": {}},
@@ -23,6 +23,12 @@ VALID_TICK = {
         "position": {"x": 3.4, "z": 2.1},
     },
     "meta": {"status": "decompressing", "notes": ""},
+    "world": {
+        "other_flies": [
+            {"id": 1, "position": {"x": -1.2, "z": 4.5}, "heading_deg": 42, "action": "idle", "wing_state": "folded"},
+            {"id": 2, "position": {"x": 5.0, "z": -2.3}, "heading_deg": 301, "action": "flying", "wing_state": "buzzing"},
+        ]
+    },
 }
 
 
@@ -57,6 +63,17 @@ def test_food_activity_missing_rejected():
 def test_position_missing_rejected():
     motor_state = {k: v for k, v in VALID_TICK["motor_state"].items() if k != "position"}
     tick = {**VALID_TICK, "motor_state": motor_state}
+    assert not is_valid_tick(tick)
+
+
+def test_world_missing_rejected():
+    tick = {k: v for k, v in VALID_TICK.items() if k != "world"}
+    assert not is_valid_tick(tick)
+
+
+def test_other_fly_missing_field_rejected():
+    other_flies = [{k: v for k, v in VALID_TICK["world"]["other_flies"][0].items() if k != "wing_state"}]
+    tick = {**VALID_TICK, "world": {"other_flies": other_flies}}
     assert not is_valid_tick(tick)
 
 

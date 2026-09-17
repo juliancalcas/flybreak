@@ -8,10 +8,12 @@ simulation's metrics.
 
 The eventual goal is an embodied fly in a calm environment with food and
 water sources and other flies of its own species to encounter -- never a
-fear/threat stimulus. Not built yet: today's engine is a single
-disembodied fly with one scalar stimulus and no world to move through.
-See "Where this is headed" below for what that actually requires and the
-smallest first step toward it.
+fear/threat stimulus. Most of the pieces now exist: a real, authoritative
+position, a food landmark and a water landmark the fly actually moves
+toward, and a shared world of 3 flies (one controlled, two autonomous)
+that can sense each other and end up nearby. See "Where this is headed"
+below for exactly what's built, what's still simplified, and what's
+genuinely not built yet.
 
 ## Quick start
 
@@ -68,16 +70,22 @@ without the real engine, and the engine's contract is enforced by
   ~50 MB data is never in git.
 - `mood.py` -- `MoodController`: the hybrid `mood_level` (see "The
   mood_level stimulus" below).
-- `server.py` -- ticks the network at 20 Hz, applies `mood_level` as a
-  *lowered* firing threshold on the motor+descending pathway (easier to
-  spike, not harder -- the opposite direction of the project's earlier
-  "ethanol intoxication" stimulus this replaced; a deliberate design
-  choice, not a documented biological effect, though the direction
-  mirrors the real dopaminergic reward pathway's general role, which this
-  model has no separate route for), derives `motor_state` from the
-  resulting activity, validates every tick against
-  `contract/schema_v1.json` before sending it, and listens for control
-  messages on the same socket.
+- `server.py` -- `Simulation` ticks one fly's network at 20 Hz, applies
+  `mood_level` as a *lowered* firing threshold on the motor+descending
+  pathway (easier to spike, not harder -- the opposite direction of the
+  project's earlier "ethanol intoxication" stimulus this replaced; a
+  deliberate design choice, not a documented biological effect, though
+  the direction mirrors the real dopaminergic reward pathway's general
+  role, which this model has no separate route for), derives
+  `motor_state` from the resulting activity, and validates every tick
+  against `contract/schema_v1.json` before sending it. `World` (see
+  "Where this is headed" -- "Multiple flies") owns a fixed `N_FLIES = 3`
+  of these `Simulation`s as ONE shared space, ticked together by a single
+  background task regardless of client count; a connecting browser
+  controls `world.flies[0]` (mood_level set/override, same control
+  messages as before, over the same socket) and streams back fly 0's own
+  tick plus `world.other_flies` (the other two flies' minimal renderable
+  state) each tick interval.
 
 Run it standalone (`python __main__.py`, see "Quick start" above, does
 this and the frontend together in one command -- use this form instead
@@ -86,20 +94,26 @@ a raw WebSocket client):
 
 ```bash
 python -m engine.fetch_connectome  # once per machine, ~50 MB, ~10-15s to load after
-python -m engine.server            # ws://127.0.0.1:8765, one Simulation per client
+python -m engine.server            # ws://127.0.0.1:8765, one shared World (3 flies), any number of viewers
 ```
 
 ### `contract/` -- the data contract
 
 - `schema_v1.json` -- JSON Schema for one tick, matching the shape agreed
   in the project brief (`schema_version`, `tick`, `sim_time_ms`,
-  `stimulus`, `activity`, `motor_state`, `meta`). Currently `"1.3"` --
-  bumped from `"1.2"` when `motor_state.position` (`{"x", "z"}`) was
-  added, giving the engine authoritative fly position for the first time
-  (see "Where this is headed"); `"1.2"` was bumped from `"1.1"` when
-  `activity.food_activity` was added, which itself was bumped from
-  `"1.0"` when `stimulus.bac_level` was renamed to `stimulus.mood_level`
-  (see "The mood_level stimulus").
+  `stimulus`, `activity`, `motor_state`, `meta`, `world`). Currently
+  `"1.4"` -- bumped from `"1.3"` when top-level `world.other_flies`
+  (array of `{id, position, heading_deg, action, wing_state}`) was added,
+  giving a viewer visibility into the other flies sharing its fly's world
+  (see "Where this is headed" -- "Multiple flies"); the existing
+  `stimulus`/`activity`/`motor_state`/`meta` fields keep describing "your"
+  fly exactly as before, unchanged. `"1.3"` was bumped from `"1.2"` when
+  `motor_state.position` (`{"x", "z"}`) was added, giving the engine
+  authoritative fly position for the first time (see "Where this is
+  headed"); `"1.2"` was bumped from `"1.1"` when `activity.food_activity`
+  was added, which itself was bumped from `"1.0"` when
+  `stimulus.bac_level` was renamed to `stimulus.mood_level` (see "The
+  mood_level stimulus").
 - `validator.py` -- `validate_tick()` / `is_valid_tick()`, used by both the
   real engine and the mock stream so neither can silently drift from the
   schema.
@@ -177,11 +191,22 @@ see its own comments for the measured numbers.
 time, not `super_class`: `class == "gustatory"`, `sub_class ==
 "sugar/water"` -- 129 neurons, a real, identity-labeled appetitive taste
 channel) gets a distance-scaled drive boost in `server.py`'s `step()` --
-strongest at/near `FOOD_POSITION`, falling off with the fly's own
-distance from it -- on top of the baseline noise every neuron still
-gets, reported as `activity.food_activity` -- see "Where this is headed"
-below for why this population, and `server.py`'s `_FOOD_RANGE` comment
-for the measured near-vs-far numbers and the falloff shape.
+strongest at/near whichever of `FOOD_POSITION`/`WATER_POSITION` the fly
+is currently closer to, falling off with the fly's own distance from it
+-- on top of the baseline noise every neuron still gets, reported as
+`activity.food_activity` -- see "Where this is headed" below for why
+this is one population driven by two landmarks, not two populations,
+and `server.py`'s `_FOOD_RANGE` comment for the measured near-vs-far
+numbers and the falloff shape.
+
+`net.visual_mask` (FlyWire's `super_class` again: `optic` +
+`visual_projection`, 85,557 of 139,255 neurons -- vision is most of the
+real fly's brain, and is here too) gets a smaller, distance-scaled boost
+when another fly is nearby (`World`'s shared multi-fly space -- see
+"Where this is headed" -- "Multiple flies"), reusing the same falloff
+shape at `server.py`'s own `_SOCIAL_RANGE`/`_SOCIAL_BOOST`. Unlike the
+food/water gradient, this needs no contact-vs-distance caveat: vision is
+a genuine distance sense in the real fly.
 
 ## The mood_level stimulus
 
@@ -206,39 +231,49 @@ not neutral.
 
 ## Where this is headed
 
-The actual goal (not built yet): an embodied fly in a simple, calm
-environment with food and water sources, encountering other flies of its
-own species, that never experiences a fear/threat stimulus. That is a
-different kind of system from what exists today -- a disembodied fly with
-one scalar stimulus and no world to move through -- and it means at least:
+The actual goal: an embodied fly in a simple, calm environment with food
+and water sources, encountering other flies of its own species, that
+never experiences a fear/threat stimulus. A world, food and water
+sources, real sensory input, and a shared multi-fly space are now all
+built, in the narrow, specific ways described below; what each one still
+leaves out, honestly, follows each.
 
-- **A world** (first step now done): some spatial representation the fly
-  can approach a food/water source *toward*, not just an abstract
-  stimulus value. `Simulation` (`server.py`) now owns real, authoritative
+- **A world**: `Simulation` (`server.py`) owns real, authoritative
   `(self._x, self._z)` position -- previously position existed only
   client-side, as `frontend/index.html`'s own dead-reckoning integration
   of `heading_deg`/`speed`; the engine itself had zero concept of where
   the fly was. Position advances every tick the same way that client-side
   code always did (`x += sin(heading) * speed * STEP`), reported as
-  `motor_state.position` (`{"x", "z"}`, schema `"1.3"`). The one food
-  source is now a real fixed point in that same space (`FOOD_POSITION`,
-  `(6, 5)`, matching the frontend's existing prop), `food_activity`'s
-  boost is now a distance-scaled gradient off that point instead of a
-  flat always-on value (near food ~0.63-0.67, far from it ~0.22-0.24 --
-  see `server.py`'s `_FOOD_RANGE` comment), and the heading update has a
-  chemotaxis-like bias that nudges toward the food's true bearing,
-  strength scaling with how much food-drive is actually present, so the
-  fly reliably finds and orbits the food from spawn without the wander
-  ever being fully overridden (see `_FOOD_STEER_GAIN`'s comment and
-  `tests/test_engine.py`'s empirical trajectory tests). This is still a
-  small, deliberately narrow slice of "a world," not the real thing: one
-  fixed food object, no water source or any other food type, no
-  obstacles or collision, no boundaries (the fly can wander arbitrarily
-  far if it hasn't picked up the food's scent yet), and still only one
-  fly with nothing else in the space to sense.
-- **Real sensory input, not a flat noise `drive`** (first step now done):
-  `network.py`'s `drive` array used to be uniform random noise across all
-  139,255 neurons, with nothing food- or danger-specific in it. An
+  `motor_state.position` (`{"x", "z"}`, schema `"1.3"`+). Still narrow:
+  no obstacles or collision (between flies or landmarks), no boundaries
+  at all (a fly can wander arbitrarily far if it hasn't picked up either
+  landmark's scent yet).
+- **Food and water sources**: `FOOD_POSITION` (`(6, 5)`, matching the
+  frontend's existing prop) and `WATER_POSITION` (`(-6, -5)`, the
+  diagonally opposite quadrant, same ~7.81-unit distance from spawn) are
+  both real fixed points in that same space. Both drive the SAME
+  `net.food_mask` population through the SAME distance-scaled gradient
+  (near either one ~0.63-0.67, far from both ~0.22-0.24 -- see
+  `server.py`'s `_FOOD_RANGE` comment) -- deliberately one channel, not
+  two: FlyWire's own classification has exactly one real, identity-
+  labeled appetitive taste channel (`class == "gustatory"`, `sub_class ==
+  "sugar/water"`, 129 neurons -- see "Real sensory input" below), not a
+  separate sugar-sensing and water-sensing population, so `WATER_POSITION`
+  reuses `FOOD_POSITION`'s exact mechanism instead of inventing a second,
+  fake channel with no real data behind it (see `server.py`'s
+  `WATER_POSITION` comment). The two proximities combine via `max()`, not
+  a sum -- a real receptor population saturates on the stronger of two
+  simultaneous stimuli, it doesn't get double-activated by two distant
+  attractants at once. The chemotaxis steering bias retargets each tick
+  to whichever landmark currently has the higher proximity, so the fly
+  reliably finds and orbits whichever one it's actually closer to (see
+  `tests/test_engine.py`'s empirical trajectory tests for both
+  directions). Still narrow: still the one gustatory channel for both,
+  no other food type, and both landmarks are static, non-depleting
+  points -- nothing is "eaten."
+- **Real sensory input, not a flat noise `drive`**: `network.py`'s
+  `drive` array used to be uniform random noise across all 139,255
+  neurons, with nothing food-, water-, or danger-specific in it. An
   earlier work cycle believed FlyWire's classification named a food-odor
   channel (`OLF_ORN_FOOD`, 1851 neurons) and a danger-odor channel
   (`OLF_ORN_DANGER`, 430 neurons) to route drive through -- **verified
@@ -251,20 +286,62 @@ one scalar stimulus and no world to move through -- and it means at least:
   (taste on contact, 408 neurons total), is a real appetitive channel
   (`sub_class == "sugar/water"`, 129 neurons) and a real aversive one
   (`sub_class == "bitter"`, 65 neurons). `net.food_mask` (the gustatory
-  sugar/water population) now gets a distance-scaled drive boost in
+  sugar/water population) gets a distance-scaled drive boost in
   `server.py`'s `step()`, off the fly's own position relative to
-  `FOOD_POSITION` (see "A world" above) -- "food is present, and more so
-  the closer the fly gets," the smallest real step described below, now
-  taken a step further than the original static version. Flagged
-  honestly where it's implemented: real gustatory (taste) sensing is
-  contact-based in the actual fly, not a distance gradient -- that's
-  really an olfactory mechanism this codebase has no separate channel
-  for, so ramping taste up with proximity is a modeling simplification,
-  same kind as the ACH/DA/SER/OCT-as-excitatory one already made in
-  `network.py`. The visual pathway (`optic`, `visual_projection`) is
-  already modeled but not yet driven by anything food-specific.
-- **Multiple flies**: more than one `Simulation` (or one shared world
-  serving several), with some way for them to sense each other.
+  whichever landmark is closer -- "an attractant is present, and more so
+  the closer the fly gets to it" -- flagged honestly where it's
+  implemented: real gustatory (taste) sensing is contact-based in the
+  actual fly, not a distance gradient -- that's really an olfactory
+  mechanism this codebase has no separate channel for, so ramping taste
+  up with proximity is a modeling simplification, same kind as the
+  ACH/DA/SER/OCT-as-excitatory one already made in `network.py`. The
+  visual pathway (`optic` + `visual_projection`, `net.visual_mask`, see
+  "Multiple flies" below) is now driven too, by conspecific proximity --
+  and needs no such caveat, since vision genuinely is a distance sense in
+  the real fly, unlike taste.
+- **Multiple flies**: `World` (`server.py`) holds a fixed `N_FLIES = 3`
+  `Simulation`s as one shared, continuously-ticked space -- previously
+  each connecting browser got its own private `Simulation`, so two tabs'
+  flies could never be near each other (no shared coordinate space at
+  all). A background `asyncio` task ticks all 3 together at the existing
+  20 Hz regardless of client count, so the two autonomous flies (indices
+  1-2, whose `MoodController`s just auto-ramp forever, nothing ever calls
+  `set_manual` on them) keep living with nobody watching; a connecting
+  browser controls `world.flies[0]` exactly as the single-fly version
+  always worked, and additionally sees `world.other_flies` (schema
+  `"1.4"`) -- the other two flies' `id`/`position`/`heading_deg`/`action`/
+  `wing_state`, enough to render them moving realistically, deliberately
+  not their full `activity`/`stimulus` (a viewer has no neural
+  introspection into flies it doesn't control). Each tick is two-pass:
+  every fly's position is snapshotted at the END of the previous tick
+  before any fly moves, so "how close is my nearest peer" reads a single
+  consistent world-state for all 3 flies, not one that's already half-
+  updated. When another fly is within `_SOCIAL_RANGE` (real numbers in
+  `server.py`'s comment), `net.visual_mask` gets a small, distance-scaled
+  boost, same gradient shape as food/water. Deliberately, there is NO
+  fly-to-fly steering bias: since all 3 flies are independently drawn
+  toward the same two fixed landmarks, correlated resource-seeking
+  brings them into proximity over time on its own, without an engineered
+  "flocking" force that wasn't asked for and would be harder to justify
+  as grounded in anything real. Verified empirically, not assumed: across
+  5 seed sets, 2500 ticks each, at least one pair of the 3 flies always
+  ends up within ~0.004-0.4 units of each other well before tick 500 and
+  stays that close for the rest of the run -- sometimes all 3 converge on
+  the same landmark (seeds `[0,1,2]`: peak separation ever only ~2.2
+  units, all three end up together), sometimes two do while the third
+  settles at the other landmark and ends up genuinely far off instead
+  (seeds `[10,11,12]`: one pair stays within ~0.004 units of each other
+  while the third fly ends up ~16 units away) -- either way, real
+  proximity between at least two flies happens in every seed tested,
+  purely from shared landmark-seeking (see
+  `tests/test_engine.py`'s
+  `test_flies_end_up_near_each_other_without_fly_to_fly_steering`). Still
+  narrow, and still not the real thing: a
+  fixed count of 3 flies, not a dynamic population; no breeding or
+  reproduction; no collision between flies; and no actual "meeting"
+  behavior beyond proximity and the neutral visual-sensing boost above --
+  no grooming, courtship, or any other real conspecific interaction
+  `solomonsealed/flybrain`'s own richer simulation models.
 - **No fear stimulus, ever**: `class == "gustatory"`, `sub_class ==
   "bitter"` (65 neurons) is the real aversive analog of the fabricated
   `OLF_ORN_DANGER` above -- it exists in the real data and could be
@@ -272,7 +349,10 @@ one scalar stimulus and no world to move through -- and it means at least:
   drives its spiderweb-fear stimulus. Deliberately never masked, read, or
   wired to anything anywhere in this codebase, by design, not by
   omission -- same commitment as always, now pointed at the real label
-  instead of an invented one.
+  instead of an invented one. The new conspecific-proximity boost above
+  is, and must stay, a neutral "notices a peer" signal: nothing about
+  another fly's presence ever lowers `mood_level`, adds an aversive
+  drive, or affects anything negatively.
 
 `solomonsealed/flybrain` (already vendored here as the connectome data
 source) has already built almost exactly this world -- a walled orchard
@@ -289,20 +369,15 @@ mood_level's own effect on `food_activity` is small (~0.03 across the full
 sweep, see `server.py`'s `_FOOD_BOOST` comment) next to the boost's own
 effect, so the two are in fact distinguishable in the real data.
 
-The step after that -- giving the engine real position and making the one
-food source something the fly actually moves toward, instead of a fixed
-prop the frontend happened to draw at a coincidental spot -- is also now
-done (see "A world" above): `Simulation` tracks `(x, z)`, `food_activity`
-is a real function of distance to `FOOD_POSITION` instead of a flat value,
-and the heading update has a chemotaxis-like bias toward it. Verified
-empirically (`tests/test_engine.py`), not just algebraically: across
-several seeds the fly reliably finds and then orbits close to the food
-from its `(0, 0)` spawn. Still open, and still a large gap from "the
-goal": a water source and any food type beyond the one gustatory channel,
-multiple flies able to sense each other, obstacles/collision, and any
-actual boundary to the world at all (right now the fly can wander
-unboundedly far before it ever picks up the food's scent) -- the fear
-channel stays unwired regardless.
+Since then: real position and chemotaxis toward a single food landmark,
+then a second (water) landmark reusing the same one real channel, and
+then a shared multi-fly world with real (if neutral, non-steering)
+conspecific sensing -- see the five bullets above for what each of those
+actually does and doesn't cover. Still genuinely open: no obstacles or
+collision anywhere, no world boundary at all, only one real sensory
+channel behind both landmarks, a fixed 3-fly population with no breeding
+and no real "meeting" behavior beyond proximity -- and the fear channel
+stays unwired regardless.
 
 ## Attribution
 

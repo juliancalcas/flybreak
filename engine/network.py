@@ -62,6 +62,20 @@ MOTOR_SUPER_CLASSES = frozenset({"motor", "descending"})
 FOOD_CLASS = "gustatory"
 FOOD_SUB_CLASS = "sugar/water"
 
+# The real analog of "another fly is visibly nearby" (see server.py's
+# World/_SOCIAL_RANGE -- Part 2 of "multiple flies", README.md's "Where
+# this is headed"). FlyWire's own `super_class` values `optic` (the
+# compound eye's own optic-lobe circuitry, 77,873 neurons) and
+# `visual_projection` (neurons carrying visual information onward into the
+# central brain, 7,684 neurons) are the real visual pathway -- already
+# discovered and reported per-tick via `regions`/`region_masks` (see
+# `active_regions` in server.py's payload), now also driven by another
+# fly's proximity (see server.py's World/_SOCIAL_BOOST). Unlike
+# FOOD_CLASS/FOOD_SUB_CLASS above (a real contact-taste channel modeled
+# as a distance gradient, flagged as a simplification), vision is a
+# genuine distance sense in the real fly -- no such caveat applies here.
+VISUAL_SUPER_CLASSES = frozenset({"optic", "visual_projection"})
+
 # GABA is the fly CNS's primary fast inhibitory transmitter; glutamate
 # acts through inhibitory glutamate-gated chloride channels in insects
 # (unlike its excitatory role in vertebrates) -- both well-established,
@@ -102,6 +116,7 @@ class _Connectome:
     region_masks: dict             # region -> (n,) bool mask, precomputed once
     motor_mask: np.ndarray         # (n,) bool, region_of in MOTOR_SUPER_CLASSES
     food_mask: np.ndarray          # (n,) bool, class==FOOD_CLASS & sub_class==FOOD_SUB_CLASS
+    visual_mask: np.ndarray        # (n,) bool, region_of in VISUAL_SUPER_CLASSES
     w: sparse.csr_matrix           # (n, n), w[post, pre] = signed synapse weight
 
 
@@ -145,6 +160,7 @@ def _load_connectome() -> _Connectome:
     region_masks = {r: (region_of == r) for r in regions}
     motor_mask = np.isin(region_of, list(MOTOR_SUPER_CLASSES))
     food_mask = (class_of == FOOD_CLASS) & (sub_class_of == FOOD_SUB_CLASS)
+    visual_mask = np.isin(region_of, list(VISUAL_SUPER_CLASSES))
 
     index_of_id = {int(v): i for i, v in enumerate(root_ids.tolist())}
     pre_ids, post_ids, syn_strs, nt_types = _read_connections()
@@ -169,7 +185,7 @@ def _load_connectome() -> _Connectome:
 
     return _Connectome(n=n, region_of=region_of, regions=regions,
                         region_masks=region_masks, motor_mask=motor_mask,
-                        food_mask=food_mask, w=w)
+                        food_mask=food_mask, visual_mask=visual_mask, w=w)
 
 
 class LIFNetwork:
@@ -191,6 +207,7 @@ class LIFNetwork:
         self._region_masks = connectome.region_masks
         self.motor_mask = connectome.motor_mask
         self.food_mask = connectome.food_mask
+        self.visual_mask = connectome.visual_mask
         self.w = connectome.w
 
         self.v = np.full(self.n, _V_REST, dtype=np.float32)
