@@ -107,10 +107,10 @@
     <div class="label" id="synapse-label">synapse map (waiting for graph...)</div>
     <canvas id="synapse-canvas" width="720" height="520"></canvas>
     <div id="synapse-legend">
-      <span><span class="dot" style="background:#4ad8ff;"></span>visual</span>
-      <span><span class="dot" style="background:#ffffff;"></span>motor</span>
-      <span><span class="dot" style="background:#ff9d3d;"></span>food</span>
-      <span><span class="dot" style="background:#3a5a4a;"></span>other</span>
+      <span><span class="dot" style="background:#3987e5;"></span>visual</span>
+      <span><span class="dot" style="background:#199e70;"></span>motor</span>
+      <span><span class="dot" style="background:#d95926;"></span>food</span>
+      <span><span class="dot" style="background:#898781;"></span>other</span>
     </div>
   </div>
 </div>
@@ -286,18 +286,29 @@
   let nodeFlash = null;         // Float32Array 0..1, per node id, decays every tick
   let edgeFlash = null;         // Float32Array 0..1, per edge index, decays every tick
 
-  // real region string -> the same body-part accent color this project
-  // already uses for that region on the fly's own anatomy (PART_COLORS
-  // above), so the graph panel and the 3D fly read as one color language.
+  // real region string -> a validated categorical color, per the `dataviz`
+  // skill's documented default palette (references/palette.md), NOT ad-hoc
+  // hex values. This is a scatter/point-cloud render where any two points
+  // can land adjacent on screen, so it needs the skill's `--pairs all`
+  // validation, not just adjacent-pair checks -- the full 8-slot dark
+  // palette does not clear `--pairs all` (documented: only the first 3
+  // slots do), so per the skill's own fold-to-"Other" guidance, only 3 real
+  // categorical slots are used for the 3 named populations and the 4th
+  // ("other" -- the majority, real neurons the BFS walk reached that aren't
+  // in any of the three) gets the palette's documented neutral chart-chrome
+  // gray instead of a 4th saturated hue (a low-chroma neutral doesn't need
+  // to clear the CVD/normal-vision floors a competing categorical hue
+  // would -- it deliberately recedes rather than competing for identity).
+  // Verified: `node scripts/validate_palette.js
+  // "#3987e5,#d95926,#199e70" --mode dark --pairs all` -> ALL CHECKS PASS
+  // (worst all-pairs CVD deltaE 9.4, worst normal-vision deltaE 20.9).
   // is_food/is_motor/is_visual are checked in this priority order when a
-  // sampled node (rare, but real) carries more than one flag; nodes with
-  // none of the three (expected -- real neurons reached by BFS beyond the
-  // seed populations, not an error) fall back to a neutral dim tone.
+  // sampled node (rare, but real) carries more than one flag.
   const SYNAPSE_NODE_COLOR = {
-    visual: 0x4ad8ff, // matches PART_COLORS.eyes.bright
-    motor: 0xffffff,  // matches PART_COLORS.legs.bright
-    food: 0xff9d3d,   // matches PART_COLORS.proboscis.bright / the food landmark
-    neutral: 0x3a5a4a,
+    visual: 0x3987e5,  // dataviz palette dark slot 1 (blue)
+    motor: 0x199e70,   // dataviz palette dark slot 3 (aqua)
+    food: 0xd95926,    // dataviz palette dark slot 2 (orange)
+    neutral: 0x898781, // dataviz palette "Muted (axis/labels)" chart chrome gray
   };
   function synapseNodeColor(node) {
     if (node.is_visual) return SYNAPSE_NODE_COLOR.visual;
@@ -305,6 +316,21 @@
     if (node.is_food) return SYNAPSE_NODE_COLOR.food;
     return SYNAPSE_NODE_COLOR.neutral;
   }
+
+  // base point sizes, shrunk from the first pass (0.16 / 0.1) -- smaller
+  // points overlap less at real 1000-node density, which is most of what
+  // keeps individual colors from bleeding into each other once several
+  // cluster close together (paired with the glow/blending tuning above).
+  const SYNAPSE_SIZE_FLAGGED = 0.115;
+  const SYNAPSE_SIZE_UNFLAGGED = 0.075;
+  const SYNAPSE_SIZE_FLASH_BOOST = 0.16; // extra size on a full spike flash
+  // a spike flash no longer lerps all the way to the flash color -- at full
+  // strength it used to fully replace the category color with near-white,
+  // which (at real tick rates, several nodes flashing at once) read as
+  // random white blobs unrelated to category color. Capped so the flash
+  // still reads as a highlight (brighter, bigger) without erasing which
+  // category the node belongs to.
+  const SYNAPSE_FLASH_MAX_LERP = 0.55;
 
   // deterministic, non-random layout: cluster nodes by their real `region`
   // string, place clusters evenly around a ring (sorted region names, so
@@ -362,14 +388,20 @@
   // canvas radial gradient (no external image fetch) -- THREE.Points +
   // this + AdditiveBlending is what makes overlapping nodes bloom into
   // soft volumetric-looking clusters, same trick the reference look uses.
+  // Tightened vs. the first pass (smaller solid core, faster falloff, lower
+  // peak alpha) -- the original spread too wide/bright and, once many
+  // overlapping additive points stacked up, saturated every color to the
+  // same white flare instead of reading as distinct per-node hues (real
+  // user report: "solo se ven como un flare"). This still glows -- it just
+  // doesn't blow out to white as quickly when points cluster.
   function makeGlowSprite() {
     const size = 64;
     const c = document.createElement("canvas");
     c.width = c.height = size;
     const ctx = c.getContext("2d");
     const g = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
-    g.addColorStop(0, "rgba(255,255,255,1)");
-    g.addColorStop(0.3, "rgba(255,255,255,0.6)");
+    g.addColorStop(0, "rgba(255,255,255,0.85)");
+    g.addColorStop(0.22, "rgba(255,255,255,0.4)");
     g.addColorStop(1, "rgba(255,255,255,0)");
     ctx.fillStyle = g;
     ctx.fillRect(0, 0, size, size);
@@ -397,6 +429,13 @@
   // instead -- lets each point's real size (bigger for is_food/is_motor/
   // is_visual, and growing further on a real spike flash) and real color
   // both vary per-vertex while keeping the soft sprite + additive glow.
+  // point size (the 190.0 constant, was 260.0) and glow intensity (the
+  // 0.72 alpha multiplier below) are both tuned down from the first pass:
+  // at 1000 real nodes packed into a small cloud, the original size/glow
+  // combo overlapped so much that additive blending stacked every color up
+  // to white and the whole cloud read as one flare instead of distinct
+  // per-node colors. Still real glow (soft sprite + additive), just no
+  // longer strong enough to wash out into white where points cluster.
   function makeSynapsePointsMaterial() {
     return new THREE.ShaderMaterial({
       uniforms: { pointTexture: { value: synapseGlowTex } },
@@ -407,7 +446,7 @@
         void main() {
           vColor = pointColor;
           vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
-          gl_PointSize = size * (260.0 / -mvPosition.z);
+          gl_PointSize = size * (190.0 / -mvPosition.z);
           gl_Position = projectionMatrix * mvPosition;
         }
       `,
@@ -416,7 +455,7 @@
         varying vec3 vColor;
         void main() {
           vec4 tex = texture2D(pointTexture, gl_PointCoord);
-          gl_FragColor = vec4(vColor, 1.0) * tex;
+          gl_FragColor = vec4(vColor, 1.0) * tex * 0.72;
         }
       `,
       transparent: true,
@@ -465,7 +504,7 @@
       const base = new THREE.Color(synapseNodeColor(node));
       synapseBaseColors[i] = base;
       colors[i * 3] = base.r; colors[i * 3 + 1] = base.g; colors[i * 3 + 2] = base.b;
-      sizes[i] = flagged ? 0.16 : 0.1;
+      sizes[i] = flagged ? SYNAPSE_SIZE_FLAGGED : SYNAPSE_SIZE_UNFLAGGED;
     }
     synapsePointsGeo = new THREE.BufferGeometry();
     synapsePointsGeo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
@@ -541,9 +580,9 @@
     for (let i = 0; i < nodes.length; i++) {
       const flash = nodeFlash[i];
       _synTmp.copy(synapseBaseColors[i]);
-      if (flash > 0.02) _synTmp.lerp(SYNAPSE_FLASH_COLOR, Math.min(1, flash));
+      if (flash > 0.02) _synTmp.lerp(SYNAPSE_FLASH_COLOR, Math.min(SYNAPSE_FLASH_MAX_LERP, flash));
       colorAttr.setXYZ(i, _synTmp.r, _synTmp.g, _synTmp.b);
-      sizeAttr.setX(i, (synapseFlagged[i] ? 0.16 : 0.1) + flash * 0.22);
+      sizeAttr.setX(i, (synapseFlagged[i] ? SYNAPSE_SIZE_FLAGGED : SYNAPSE_SIZE_UNFLAGGED) + flash * SYNAPSE_SIZE_FLASH_BOOST);
     }
     colorAttr.needsUpdate = true;
     sizeAttr.needsUpdate = true;
@@ -872,6 +911,7 @@
         wingFlap: 0,
         action: "idle",
         wingState: "folded",
+        velocityY: 0, // basic gravity: real per-instance vertical velocity, integrated in updateFlyInstance
         targetPos: { x: i === 0 ? 0 : (i === 1 ? 2 : -2), z: i === 0 ? 0 : (i === 1 ? 2 : -2) },
       };
       inst.group.position.set(inst.targetPos.x, 1.2, inst.targetPos.z);
@@ -959,12 +999,35 @@
   // animated frame so ~20Hz ticks don't look like ~60fps teleports.
   const POSITION_LERP = 0.12;
 
-  function updateFlyInstance(instance) {
+  // ---- basic gravity ("física básica") for vertical fly motion ----
+  // While flying, height is still driven directly by the bob oscillation
+  // (unchanged). The moment a fly is no longer flying -- including the exact
+  // tick it transitions out of "flying" into "walking"/"idle"/etc -- it
+  // stops snapping to the ground height and instead falls there: a real
+  // per-instance vertical velocity (started at 0) gets a constant downward
+  // acceleration integrated into it every frame, and that velocity carries
+  // the height down until it reaches the ground, at which point it's
+  // clamped there and the velocity is zeroed (landed). Single constant `g`,
+  // simple velocity += g*dt; y += v*dt integration -- no collision mesh, no
+  // bounce, no per-fly mass, same as every other fly (no special-casing fly 0).
+  const GRAVITY = -22; // world units / s^2, constant downward acceleration
+  const GROUND_Y = 1.2; // reuse the existing "grounded" height
+
+  function updateFlyInstance(instance, dt) {
     const action = instance.action || "idle";
     if (action === "flying") {
       instance.group.position.y = 3 + Math.sin(performance.now() / 300 + instance.id * 2) * 0.6;
+      // reset so that whenever flight ends, the fall starts from rest at
+      // the bob's current height, not from whatever speed it had last time
+      // it was falling.
+      instance.velocityY = 0;
     } else {
-      instance.group.position.y = 1.2;
+      instance.velocityY += GRAVITY * dt;
+      instance.group.position.y += instance.velocityY * dt;
+      if (instance.group.position.y <= GROUND_Y) {
+        instance.group.position.y = GROUND_Y;
+        instance.velocityY = 0; // landed: zero out vertical velocity on ground contact
+      }
     }
     instance.group.position.x += (instance.targetPos.x - instance.group.position.x) * POSITION_LERP;
     instance.group.position.z += (instance.targetPos.z - instance.group.position.z) * POSITION_LERP;
@@ -977,10 +1040,17 @@
     instance.wingR.rotation.z = -flapAngle;
   }
 
+  let lastFrameTime = performance.now();
   function animate() {
     requestAnimationFrame(animate);
 
-    for (const instance of flies) updateFlyInstance(instance);
+    const now = performance.now();
+    // clamp dt so a stalled tab / slow first frame doesn't send gravity
+    // integration flying off in one huge jump.
+    const dt = Math.min(0.05, Math.max(0, (now - lastFrameTime) / 1000));
+    lastFrameTime = now;
+
+    for (const instance of flies) updateFlyInstance(instance, dt);
 
     // each landmark pulses by food_activity * ITS OWN local proximity
     // weight -- honestly grounded in real position data, not a copy of the
@@ -1031,7 +1101,7 @@
   // before this script runs (e.g. window.FLYBREAK_DEBUG = true via
   // page.addInitScript in a Playwright test) -- never touches app behavior.
   if (window.FLYBREAK_DEBUG) {
-    window.__flybreak = { scene, camera, renderer, flies, THREE };
+    window.__flybreak = { scene, camera, renderer, flies, THREE, updateFlyInstance };
   }
 
   // real-time HUD/synapse-map/WS wiring starts immediately -- none of it
