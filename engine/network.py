@@ -104,9 +104,9 @@ def warm_cache() -> None:
     every connection -- not just the one that triggered it -- for the
     whole load. See server.py's `main()`, which calls this before
     `websockets.serve()`. Also forces `get_sample_graph()`'s one-time BFS
-    sample-build now, for the same reason -- measured at ~0.2s for the
-    real 10,000-node sample (see README.md's "The live synapse sample"),
-    cheap next to the ~10-15s connectome load itself, but still
+    sample-build now, for the same reason -- measured well under 0.2s for
+    the real ~1,000-node sample (see README.md's "The live synapse
+    sample"), cheap next to the ~10-15s connectome load itself, but still
     synchronous work that should happen before, not during, the first
     client's connection.
     """
@@ -278,9 +278,22 @@ class LIFNetwork:
 # across restarts -- which is all server.py needs: one shared World, one
 # `w`, so one sample reused for every fly and every client connection
 # for that process's lifetime.
+#
+# Was 9500/10000 (a real measured 10,000 nodes / 253,595 edges / 16.2 MB
+# of JSON -- see README.md's original "The live synapse sample" numbers).
+# Brought back down to ~950/1000 after actually looking at the rendered
+# result: at 10,000 nodes, with the frontend's additive-blending glow on
+# every node/edge, the sample reads as a single undifferentiated flare,
+# not a legible network -- too dense to tell individual neurons or edges
+# apart. 1,000 is small enough to actually look like a network of
+# distinguishable points and lines on screen while still being a real,
+# connected, BFS-sampled piece of the real connectome (see the module
+# comment above), not a fabricated stand-in -- same principle, smaller
+# size. See README.md's "The live synapse sample" for the real re-measured
+# node/edge/payload-size numbers at this smaller scale.
 _SAMPLE_SEED_PER_POPULATION = 20
-_SAMPLE_TARGET_NODES = 9500
-_SAMPLE_MAX_NODES = 10000
+_SAMPLE_TARGET_NODES = 950
+_SAMPLE_MAX_NODES = 1000
 
 
 @lru_cache(maxsize=1)
@@ -355,7 +368,7 @@ def get_sample_graph() -> dict:
 
     # The real (source, target, weight) edges among exactly this node
     # set, sliced straight out of the already-computed `w` -- a
-    # (<=10000 x <=10000) sub-slice, tiny next to the full (139255 x
+    # (<=1000 x <=1000) sub-slice, tiny next to the full (139255 x
     # 139255) `w`, not recomputed from the raw CSVs. `sub[a, b] =
     # w[sample_real_index[a], sample_real_index[b]] =
     # w[post=a, pre=b]` (see `w`'s own row/col convention), so an edge

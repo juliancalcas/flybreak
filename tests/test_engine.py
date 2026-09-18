@@ -14,6 +14,7 @@ from engine.server import (
     World,
     _FOOD_BOOST,
     _FOOD_RANGE,
+    _MIN_FLY_SEPARATION,
     _SOCIAL_BOOST,
     _SOCIAL_RANGE,
 )
@@ -341,27 +342,43 @@ def test_flies_end_up_near_each_other_without_fly_to_fly_steering():
     independently drawn toward the same two fixed food/water landmarks --
     correlated resource-seeking, not an engineered flocking force.
 
+    Also covers the separate, OPPOSITE-direction basic-physics rule added
+    alongside that design point: World._apply_min_separation pushes any
+    two flies apart once they are closer than _MIN_FLY_SEPARATION, a real
+    collision RESPONSE (not a sensing/steering rule -- see
+    _MIN_FLY_SEPARATION's own comment in server.py), so "near each other"
+    here means "as close as the two can get without overlapping," not
+    literal coincidence -- an earlier version of this test measured one
+    pair at ~0.004 units apart, i.e. actually coincident given the real
+    flybody mesh's own ~0.8-1.1 unit body cross-section (see
+    _MIN_FLY_SEPARATION's comment for that real measurement), before this
+    rule existed.
+
     Verified empirically across several seed sets, 2500 ticks each (see
     this project's own "verify empirically" standard, same as
     test_heading_steers_toward_food_and_fly_arrives) -- if this ever comes
     back false, the design assumption in the brief is wrong, not the test.
-    Measured directly (not asserted here, to keep this test fast; see the
-    report for the full numbers): across 5 seed sets, at least one pair of
-    the 3 flies always ends up within ~0.004-0.4 units of each other by
-    tick 500 and stays that close for the rest of a 2500-tick run --
-    sometimes because all 3 converge on the same landmark (e.g. seeds
-    [0,1,2], max pairwise separation ever only ~2.2 units), sometimes
-    because two of the three do while the third settles at the other
-    landmark instead and drifts further off (e.g. seeds [10,11,12], one
-    pair stays within ~0.004 units of each other while the third fly ends
-    up ~16 units away) -- either way, real proximity happens, from shared
-    landmark-seeking alone, in every seed tested."""
+    Measured directly with the collision response in place (same
+    methodology as the earlier pre-collision measurement above): across 3
+    seed sets, the minimum pairwise distance across the WHOLE run (not
+    just after tick 500) never drops below _MIN_FLY_SEPARATION (1.5) --
+    the collision response holds even during the shared-spawn-point start,
+    where all 3 flies begin exactly coincident at (0, 0) -- while at least
+    one pair still gets pushed right up against that floor by tick 500 and
+    stays there (all 3 seed sets: min pairwise settles at exactly 1.5),
+    and every individual fly still gets genuinely close to one of the two
+    landmarks (within ~0.6 units across all 9 flies measured, most well
+    under ~0.02) after tick 500 -- so the collision response does not
+    defeat the underlying "they end up near shared landmarks" behavior,
+    it only stops "near" from meaning "on top of."""
     seed_sets = ([0, 1, 2], [10, 11, 12], [20, 21, 22])
     n_ticks = 2500
     for seeds in seed_sets:
         world = World(seeds=seeds)
+        min_pairwise_ever = math.inf
         min_pairwise_after_500 = math.inf
         max_pairwise_ever = 0.0
+        min_landmark_dist_after_500 = [math.inf] * len(seeds)
         for t in range(1, n_ticks + 1):
             payloads = world.step()
             positions = [p["motor_state"]["position"] for p in payloads]
@@ -369,15 +386,32 @@ def test_flies_end_up_near_each_other_without_fly_to_fly_steering():
                 math.hypot(positions[i]["x"] - positions[j]["x"], positions[i]["z"] - positions[j]["z"])
                 for i in range(len(positions)) for j in range(i + 1, len(positions))
             ]
+            min_pairwise_ever = min(min_pairwise_ever, min(pair_dists))
             max_pairwise_ever = max(max_pairwise_ever, max(pair_dists))
             if t > 500:
                 min_pairwise_after_500 = min(min_pairwise_after_500, min(pair_dists))
-        # at least one pair genuinely ends up (and stays) close, well
-        # after the trivial shared-spawn-point start...
-        assert min_pairwise_after_500 < 1.0, (seeds, min_pairwise_after_500)
-        # ...and it is real convergence, not just "never moved apart" --
-        # some real separation happens somewhere in the run first.
+                for i, pos in enumerate(positions):
+                    df = math.hypot(pos["x"] - FOOD_POSITION[0], pos["z"] - FOOD_POSITION[1])
+                    dw = math.hypot(pos["x"] - WATER_POSITION[0], pos["z"] - WATER_POSITION[1])
+                    min_landmark_dist_after_500[i] = min(min_landmark_dist_after_500[i], df, dw)
+        # basic physics: the collision response holds for the ENTIRE run,
+        # including the coincident-at-spawn opening tick -- a small
+        # tolerance (not an exact ">=") only for float/multi-body-conflict
+        # slop (see _apply_min_separation's own comment on why a fly
+        # pushed by two overlaps at once is not a hard per-pair guarantee).
+        assert min_pairwise_ever > _MIN_FLY_SEPARATION - 0.05, (seeds, min_pairwise_ever)
+        # ...and real proximity still happens -- at least one pair gets
+        # pushed right up against that floor (not left free to wander
+        # arbitrarily far apart)...
+        assert min_pairwise_after_500 < _MIN_FLY_SEPARATION + 0.5, (seeds, min_pairwise_after_500)
+        # ...it is real convergence, not just "never moved apart" -- some
+        # real separation happens somewhere in the run first...
         assert max_pairwise_ever > 1.0, (seeds, max_pairwise_ever)
+        # ...and separately, the underlying "drawn to shared landmarks"
+        # behavior the collision response must not defeat: every fly,
+        # individually, still gets genuinely close to a landmark.
+        for i, d in enumerate(min_landmark_dist_after_500):
+            assert d < 1.0, (seeds, i, d)
 
 
 @requires_connectome
@@ -417,13 +451,17 @@ def test_sample_graph_is_deterministic_within_a_process():
 
 @requires_connectome
 def test_sample_graph_size_in_expected_range():
-    """~9,500-10,000 nodes -- large enough to look like a real network,
-    small enough (7.2% of the full connectome) to compute and ship once
-    per process (see README.md's live-synapse-sample section for why the
-    full 139,255/~2.7M-synapse connectome cannot be sent as-is; measured
-    there at 10,000 nodes / 253,595 edges)."""
+    """~950-1,000 nodes -- shrunk down from an earlier 9,500-10,000-node
+    version (see README.md's live-synapse-sample section): at 10,000
+    nodes, with the frontend's additive-blending glow on every node/edge,
+    the sample read as a single undifferentiated flare, not a legible
+    network. ~1,000 (0.7% of the full connectome) is small enough to
+    actually look like distinguishable points and edges while still being
+    a real, connected, BFS-sampled piece of the real connectome, and cheap
+    enough to compute and ship once per process (measured there at 1,000
+    nodes / 12,307 edges)."""
     graph = get_sample_graph()
-    assert 9500 <= len(graph["nodes"]) <= 10000
+    assert 950 <= len(graph["nodes"]) <= 1000
     assert len(graph["edges"]) > 0
 
 
@@ -506,7 +544,7 @@ def test_simulation_sample_spikes_sometimes_non_empty():
     mean the real-index mapping (or the sample itself) is disconnected
     from the network's actual spiking, not that the sample legitimately
     never fires (given this project's own measured firing rates, see
-    server.py's EMA comments -- a ~10,000 neuron sample sitting idle for
+    server.py's EMA comments -- a ~1,000 neuron sample sitting idle for
     80 straight ticks would be implausible)."""
     sim = Simulation(seed=5)
     any_non_empty = False

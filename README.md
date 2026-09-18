@@ -243,11 +243,15 @@ from each of `net.motor_mask`/`net.food_mask`/`net.visual_mask` -- the
 same three real populations `server.py` already reads every tick -- then
 BFS expands outward along the real edges in `w`, in both directions
 (who feeds a node, and who a node feeds), until the sample reaches a
-target size, hard-capped at 10,000 nodes. Measured on the real
-connectome as it stands today: **10,000 nodes, 253,595 directed edges**
-among them (the BFS frontier reached the cap well before naturally
-running out of real neighbors to add -- at this scale the sample is
-dense, not a sparse scatter). Building it takes ~0.2s (cheap next to the
+target size, hard-capped at **1,000 nodes** (`_SAMPLE_TARGET_NODES`/
+`_SAMPLE_MAX_NODES` in `network.py`). This was originally 9,500/10,000 --
+shrunk after actually looking at the running app: at 10,000 nodes, with
+the frontend's additive-blending glow on every node/edge, the sample
+read as one undifferentiated flare, not a legible network. Measured on
+the real connectome as it stands today: **1,000 nodes, 12,307 directed
+edges** among them (still dense relative to the sample size -- the BFS
+frontier reaches the cap well before naturally running out of real
+neighbors to add). Building it takes well under 0.2s (cheap next to the
 ~10-15s full connectome load it happens alongside, in `warm_cache()`).
 Every node is a real neuron with a real `super_class`
 region and the real `is_food`/`is_motor`/`is_visual` flags straight from
@@ -271,14 +275,14 @@ schema, `contract/schema_graph_v1.json`, via `validate_graph()`/
 a tick message are structurally different things sent at different
 cadences, not two shapes of the same thing.
 
-At 10,000 nodes the one-time `synapse_graph` message itself is a real
-**16.2 MB** of JSON -- large enough that `websockets`' own default
-`max_size` (1 MiB) would silently reject it (connection closed, code
-1009 "message too big") the moment a client connected; `main()` raises
-it to 32 MiB (`_MAX_WS_MESSAGE_BYTES`), real headroom above the measured
-size without going unbounded. Worth knowing if this sample ever grows
-further: that ceiling would need raising again, deliberately, not hit by
-surprise.
+At 1,000 nodes the one-time `synapse_graph` message itself is a real
+**~0.8 MB** of JSON (down from 16.2 MB at the earlier 10,000-node size).
+That's actually just under `websockets`' own default `max_size` (1 MiB)
+now, but `main()` still raises it to 32 MiB (`_MAX_WS_MESSAGE_BYTES`) --
+real, deliberate headroom kept regardless of the current payload size,
+not sized to it, so a future change to the sample size doesn't need to
+rediscover this ceiling by surprise (a silently rejected connection,
+code 1009 "message too big").
 
 Every tick after that, fly 0's payload additionally carries
 `activity.sample_spikes` -- the LOCAL sample ids (matching the
@@ -287,11 +291,11 @@ translate) that actually spiked *this specific tick*, read straight out
 of the real per-tick spike vector `LIFNetwork.step()` already computes,
 via a server-side-only mapping from local sample id back to real
 connectome index (never sent to the client). At this sample size,
-typically **~4,300-4,500 of the 10,000** once the network reaches its
-steady-state firing rate (this network's own steady-state firing
-fraction runs ~40-45% of a given population, sample included) -- still
-never the full 139,255-length spike vector, but no longer "a handful"
-either now that the sample itself is this much bigger. Same "no neural
+typically **~400-550 of the 1,000** (~45-50%) once the network reaches
+its steady-state firing rate (this network's own steady-state firing
+fraction runs ~40-45% of a given population generally, sample included,
+measured slightly higher -- ~47% -- at this particular smaller sample) --
+still never the full 139,255-length spike vector. Same "no neural
 introspection into a fly you don't control" boundary the rest of this
 project already follows for `activity`/`stimulus`: only fly 0 (the one a
 connecting browser controls) ever has its `sample_spikes` actually
@@ -425,11 +429,29 @@ leaves out, honestly, follows each.
   proximity between at least two flies happens in every seed tested,
   purely from shared landmark-seeking (see
   `tests/test_engine.py`'s
-  `test_flies_end_up_near_each_other_without_fly_to_fly_steering`). Still
-  narrow, and still not the real thing: a
-  fixed count of 3 flies, not a dynamic population; no breeding or
-  reproduction; no collision between flies; and no actual "meeting"
-  behavior beyond proximity and the neutral visual-sensing boost above --
+  `test_flies_end_up_near_each_other_without_fly_to_fly_steering`). Since
+  then, `World.step()` also runs a minimum-separation collision response
+  (`_MIN_FLY_SEPARATION`/`_apply_min_separation`, see their own comments)
+  after every tick's movement, so that "proximity" no longer means
+  literal overlap the way it briefly did (one pair measured ~0.004 units
+  apart -- coincident, given the real flybody mesh's own ~0.8-1.1 unit
+  body cross-section, see `_MIN_FLY_SEPARATION`'s comment for the real
+  measured mesh size this was picked from). This is a basic physics
+  RESPONSE, not a sensing/steering rule -- it never pulls flies together,
+  it only pushes already-close flies apart at short range, proportional
+  to the overlap (a simple linear spring), so the "no fly-to-fly
+  steering" design point above still holds exactly as stated. Re-measured
+  with the collision response in place (same seeds, same 2500-tick
+  methodology): the minimum pairwise distance across a full run now
+  floors at `_MIN_FLY_SEPARATION` (1.5 units) instead of dipping to
+  ~0.004, while flies still end up genuinely close to whichever landmark
+  they're drawn to (within ~0.6 units of it across all 9 flies measured,
+  most well under ~0.02) and close to each other where landmark-seeking
+  brings them together (pinned at the 1.5-unit floor rather than
+  closer). Still narrow, and still not the real thing: a fixed count of
+  3 flies, not a dynamic population; no breeding or reproduction; and
+  no actual "meeting" behavior beyond
+  proximity, the neutral visual-sensing boost, and now not-overlapping --
   no grooming, courtship, or any other real conspecific interaction
   `solomonsealed/flybrain`'s own richer simulation models.
 - **No fear stimulus, ever**: `class == "gustatory"`, `sub_class ==

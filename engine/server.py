@@ -205,6 +205,56 @@ _FOOD_STEER_GAIN = 0.35
 _SOCIAL_BOOST = 0.6
 _SOCIAL_RANGE = 5.0
 
+# Minimum-separation collision response for World.step() -- basic
+# physics ("no two flies occupy the same point"), the OPPOSITE kind of
+# rule from _SOCIAL_BOOST/_SOCIAL_RANGE above: that one is a small
+# ATTRACTION-flavored sensory boost with no ceiling on range (a fly
+# senses a peer from arbitrarily far away, just weakly); this is a
+# REPULSION rule that only ever acts at short range, and never pulls two
+# flies together -- see World.step()'s own comment for why the two must
+# not be confused. It also does not touch, replace, or weaken the
+# deliberate "no fly-to-fly steering" design decision (README.md,
+# "Where this is headed" -- "Multiple flies"; World's own docstring):
+# flies still aren't drawn toward each other by anything in this
+# codebase, they just can't end up on top of one another once they do
+# happen to end up close, from food/water-seeking alone.
+#
+# _MIN_FLY_SEPARATION is picked from the real rendered fly's own scale
+# (frontend/index.html's real flybody mesh -- see
+# frontend/assets/flybody/SOURCE.md), not guessed: taking the real
+# vendored thorax/abdomen/head .obj files (the fly's actual body core,
+# not the thin legs/wings that splay out well beyond it) through the
+# exact same axis-remap + FLYBODY_RECENTER + FLYBODY_SCALE=0.85 transform
+# `remapFlybodyGeometry` applies there, the assembled body's bounding box
+# measures ~0.77 units side-to-side, ~1.08 units top-to-bottom, and ~2.50
+# units front-to-back, in this same (x, z) ground-plane's units. Treating
+# each fly as roughly a ~0.75-unit-radius body (matching its real
+# side-to-side/top-to-bottom cross-section, the axes that actually matter
+# when two flies approach each other at arbitrary headings -- nose-to-
+# tail alignment, the one axis that runs to ~2.5, is not the common case),
+# two such bodies need their centers at least ~1.5 units apart before
+# they stop visually intersecting. 1.5 is comfortably above that
+# cross-section (leaves real daylight between the bodies, not just
+# touching) while staying small next to _FOOD_RANGE/_SOCIAL_RANGE (8.0/
+# 5.0) so it does not meaningfully fight the food/water attraction that
+# already, deliberately, brings flies this close together in the first
+# place (see test_flies_end_up_near_each_other_without_fly_to_fly_steering).
+_MIN_FLY_SEPARATION = 1.5
+
+# Spring stiffness for the collision response below: 1.0 means each
+# violated pair is pushed fully back out to exactly _MIN_FLY_SEPARATION
+# apart, in a single tick's correction pass, proportional to how deep the
+# overlap is (a real linear spring: displacement = overlap * stiffness,
+# split evenly between the two flies) -- not eased in over several ticks.
+# Still not a hard "wall" in the sense of clamping positions directly:
+# it only ever nudges by the measured overlap amount, so a fly involved
+# in more than one overlap at once (e.g. squeezed between two others --
+# possible but rare at N_FLIES=3) can still end up marginally under
+# _MIN_FLY_SEPARATION from one of its neighbors after both corrections
+# are summed and applied together, exactly the "soft" case
+# tests/test_engine.py's own separation test allows for.
+_SEPARATION_SPRING = 1.0
+
 
 class Simulation:
     def __init__(self, seed: int = 0):
@@ -311,12 +361,14 @@ class Simulation:
         # network.get_sample_graph) -- the LOCAL sample ids (0..N_sample-1,
         # matching that one-time message's node ids) that actually spiked
         # THIS tick, looked up from the real per-tick `spikes` vector above
-        # via the sample's real-neuron-index mapping. Typically ~4,300-4,500
-        # out of the ~10,000 sampled neurons once the network reaches its
+        # via the sample's real-neuron-index mapping. Typically ~400-550
+        # out of the ~1,000 sampled neurons once the network reaches its
         # steady-state firing rate (measured directly; this network's own
-        # steady-state firing fraction runs ~40-45% of a given population,
-        # sample included -- see README.md's live-synapse-sample section)
-        # -- never the full 139,255-length vector.
+        # steady-state firing fraction runs ~40-45% of a given population
+        # generally, sample included, measured slightly higher -- ~47% --
+        # at this particular smaller sample -- see README.md's
+        # live-synapse-sample section) -- never the full 139,255-length
+        # vector.
         sample_spikes = np.nonzero(spikes[self._sample_real_index])[0].tolist()
 
         # the real "motor" super_class is tiny (110 of 139,255 neurons) --
@@ -463,7 +515,16 @@ class World:
     so autonomous flies keep living with nobody watching. Owns N_FLIES
     independent `Simulation`s; `Simulation` itself stays the well-tested,
     independently-usable single-fly building block it already was -- World
-    only adds the shared tick and the peer-position exchange between them.
+    only adds the shared tick, the peer-position exchange between them
+    (used only for the small conspecific-proximity sensory boost, see
+    _SOCIAL_BOOST/_SOCIAL_RANGE), and a minimum-separation collision
+    response (_MIN_FLY_SEPARATION/_apply_min_separation) that keeps two
+    flies from ending up (nearly) on top of each other once resource-
+    seeking brings them close. Deliberately, there is still NO fly-to-fly
+    STEERING/attraction anywhere in this codebase -- the collision
+    response only ever pushes flies apart at close range, it never pulls
+    them together at any range; see _MIN_FLY_SEPARATION's own comment for
+    why these are opposite kinds of rules, not the same one.
     """
 
     def __init__(self, n_flies: int = N_FLIES, seeds: list[int] | None = None):
@@ -486,14 +547,82 @@ class World:
         OTHER fly) so its own drive/steering for this tick is computed
         against a single consistent world-state, not one that's already
         half-updated by whichever fly happened to step first.
+
+        A third pass then runs _apply_min_separation on the freshly
+        stepped positions -- basic collision response, not sensing: see
+        _MIN_FLY_SEPARATION's own comment for why this is a distinct,
+        opposite-direction rule from the peer-sensing pass above (that
+        one only ever biases THIS tick's drive/steering computation
+        toward attraction at any range; this one only ever pushes
+        AFTER-the-fact overlapping positions apart, at close range).
         """
         snapshot = [(f._x, f._z) for f in self.flies]
         payloads = []
         for i, fly in enumerate(self.flies):
             peers = [pos for j, pos in enumerate(snapshot) if j != i]
             payloads.append(fly.step(peer_positions=peers))
+        self._apply_min_separation(payloads)
         self.latest_payloads = payloads
         return payloads
+
+    def _apply_min_separation(self, payloads: list[dict]) -> None:
+        """Basic "can't occupy the same space" physics: pushes any pair of
+        flies closer than _MIN_FLY_SEPARATION apart back out along the
+        line between their centers, proportional to how deep the overlap
+        is (a simple linear repulsion spring -- see _SEPARATION_SPRING's
+        comment). Runs once per tick, AFTER every fly has already moved
+        under its own attraction/steering/wander for this tick (see
+        step()'s docstring) -- a collision RESPONSE to wherever food/water
+        attraction and wander already put the flies, never an input to
+        that movement itself, and never a pull toward another fly at any
+        range (see _MIN_FLY_SEPARATION's comment for why this must not be
+        confused with the _SOCIAL_BOOST/_SOCIAL_RANGE sensory boost, or
+        read as the "fly-to-fly steering" this project deliberately does
+        not have -- README.md, "Where this is headed", "Multiple flies").
+
+        Mutates both each Simulation's own (_x, _z) (so the correction
+        carries into next tick's peer-position snapshot too, not just
+        this tick's outgoing payload) and this tick's `payloads` in place
+        (so the client-facing positions -- fly 0's own "motor_state" and
+        the other flies' "world.other_flies" entries built from these
+        same payloads in _build_client_payload -- reflect the corrected,
+        not the pre-correction, positions).
+        """
+        positions = [p["motor_state"]["position"] for p in payloads]
+        n = len(payloads)
+        dx_push = [0.0] * n
+        dz_push = [0.0] * n
+        for i in range(n):
+            for j in range(i + 1, n):
+                dx = positions[i]["x"] - positions[j]["x"]
+                dz = positions[i]["z"] - positions[j]["z"]
+                dist = math.hypot(dx, dz)
+                if dist >= _MIN_FLY_SEPARATION:
+                    continue
+                overlap = _MIN_FLY_SEPARATION - dist
+                if dist < 1e-9:
+                    # Exact (or float-precision-exact) coincidence: no real
+                    # direction to push along -- fall back to a
+                    # deterministic direction from the pair's own indices
+                    # (no RNG needed, same "determinism where it's free"
+                    # style as get_sample_graph's BFS) so the two still
+                    # separate instead of sitting locked together forever.
+                    angle = (2.0 * math.pi * (i + 1)) / n + j
+                    ux, uz = math.sin(angle), math.cos(angle)
+                else:
+                    ux, uz = dx / dist, dz / dist
+                push = overlap * _SEPARATION_SPRING * 0.5
+                dx_push[i] += ux * push
+                dz_push[i] += uz * push
+                dx_push[j] -= ux * push
+                dz_push[j] -= uz * push
+        for i, fly in enumerate(self.flies):
+            if dx_push[i] == 0.0 and dz_push[i] == 0.0:
+                continue
+            fly._x += dx_push[i]
+            fly._z += dz_push[i]
+            positions[i]["x"] = fly._x
+            positions[i]["z"] = fly._z
 
     def handle_control(self, message: dict) -> None:
         """Routes a connecting client's control message to the ONE fly it
@@ -587,13 +716,14 @@ async def _handle_client(ws: ServerConnection, world: World) -> None:
         reader_task.cancel()
 
 
-# websockets' own default max_size is 1 MiB -- fine for a tick payload,
-# but the one-time synapse_graph message at the current 10,000-node
-# sample size is a real measured 16.2 MB (10,000 nodes, 253,595 real
-# edges -- see README.md's "The live synapse sample"), which the default
-# would silently reject (connection closed, code 1009 "message too
-# big") the moment a client connects. 32 MiB gives real headroom above
-# that measured size without going unbounded.
+# websockets' own default max_size is 1 MiB. The one-time synapse_graph
+# message at the current ~1,000-node sample size (down from an earlier
+# 10,000-node/16.2 MB version -- see README.md's "The live synapse
+# sample" for why it was shrunk) is a real measured ~0.8 MB (1,000 nodes,
+# 12,307 real edges), which would actually fit under that 1 MiB default
+# now -- but 32 MiB is kept anyway as real, deliberate headroom (not
+# sized to the current payload) rather than something that would need
+# raising again by surprise the next time the sample size changes.
 _MAX_WS_MESSAGE_BYTES = 32 * 1024 * 1024
 
 
