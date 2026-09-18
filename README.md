@@ -210,8 +210,11 @@ time, not `super_class`: `class == "gustatory"`, `sub_class ==
 "sugar/water"` -- 129 neurons, a real, identity-labeled appetitive taste
 channel) gets a distance-scaled drive boost in `server.py`'s `step()` --
 strongest at/near whichever of `FOOD_POSITION`/`WATER_POSITION` the fly
-is currently closer to, falling off with the fly's own distance from it
--- on top of the baseline noise every neuron still gets, reported as
+is currently closer to, falling off with the fly's own distance from it,
+and further scaled by that landmark's own current supply fraction (see
+"Where this is headed" below -- landmarks deplete while a fly eats and
+respawn after a cooldown, so this boost is not indefinitely available) --
+on top of the baseline noise every neuron still gets, reported as
 `activity.food_activity` -- see "Where this is headed" below for why
 this is one population driven by two landmarks, not two populations,
 and `server.py`'s `_FOOD_RANGE` comment for the measured near-vs-far
@@ -363,8 +366,55 @@ leaves out, honestly, follows each.
   reliably finds and orbits whichever one it's actually closer to (see
   `tests/test_engine.py`'s empirical trajectory tests for both
   directions). Still narrow: still the one gustatory channel for both,
-  no other food type, and both landmarks are static, non-depleting
-  points -- nothing is "eaten."
+  no other food type.
+
+  Each landmark now genuinely depletes and respawns (`World`'s
+  `food_supply`/`water_supply`, `_EATING_RANGE`/
+  `_SUPPLY_CONSUMPTION_PER_TICK`/`_SUPPLY_RESPAWN_TICKS`/
+  `_advance_supply` in `server.py`) -- a fly used to be able to sit on a
+  landmark forever and keep drawing the same maximum boost indefinitely,
+  which does not read as real eating ("no pueden comer eternamente, no
+  tiene sentido," reported directly from watching the running app).
+  Supply starts at 1.0 (full); while ANY fly is within `_EATING_RANGE`
+  (2.0 units -- deliberately much smaller than `_FOOD_RANGE`'s 8.0, since
+  `_FOOD_RANGE` is "can smell it from a distance" while this is "close
+  enough to actually be eating it," real near-contact feeding, not the
+  sensing range), supply drains by `_SUPPLY_CONSUMPTION_PER_TICK` (0.0025)
+  each tick, floored at 0; once at 0 a `_SUPPLY_RESPAWN_TICKS` (300)
+  cooldown starts, after which supply resets to 1.0. This is shared
+  `World` state -- one food source, one water source, not per-fly --
+  advanced once per tick alongside `_apply_min_separation`, the same
+  "World owns shared resource state" pattern that collision response
+  already established. It rides entirely on the existing
+  `activity.food_activity` field (no schema change): each landmark's raw
+  distance-gradient proximity is scaled by its own current supply
+  fraction (`effective_proximity = raw_proximity * supply_fraction`)
+  before it drives `net.food_mask`'s boost, so a depleted landmark's
+  contribution genuinely fades toward the ~0.22-0.29 no-boost baseline
+  even while a fly sits right on top of it, and genuinely climbs back
+  once the landmark respawns. `Simulation.step()` takes optional
+  `food_supply`/`water_supply` keyword args (each defaulting to 1.0,
+  same "standalone-usage default" spirit `peer_positions` already
+  follows) so `Simulation` stays independently constructible/testable
+  with no `World` around it; `World.step()` reads its own
+  `food_supply`/`water_supply` and passes them to every fly each tick.
+
+  Empirically measured (`World(n_flies=1)`, one fly held continuously at
+  `FOOD_POSITION`, TICK_HZ=20): supply hits 0 at tick 401 (~20.1s of sim
+  time -- matches `1.0/_SUPPLY_CONSUMPTION_PER_TICK` = 400 to within the
+  float-accumulation slop of 400 successive subtractions) and respawns
+  to 1.0 at tick 701 (300 ticks / 15.0s of cooldown later, exactly
+  `_SUPPLY_RESPAWN_TICKS`). Over that same run, `activity.food_activity`
+  (EMA-smoothed) sagged from its settled near-landmark range (~0.56-0.58)
+  down to ~0.24-0.29 while depleted -- indistinguishable from the
+  existing no-boost baseline -- and climbed back to ~0.57-0.58 within a
+  few ticks of respawn (see `tests/test_engine.py`'s
+  `test_world_food_supply_floors_at_zero_and_respawns_after_cooldown`
+  and `test_food_activity_differs_between_full_and_depleted_supply`).
+  Still narrow: linear depletion at a fixed rate and a fixed cooldown,
+  no partial/probabilistic regrowth, and eating range is a simple
+  distance check with no notion of how much of the supply a fly actually
+  "consumes" versus another fly at the same landmark.
 - **Real sensory input, not a flat noise `drive`**: `network.py`'s
   `drive` array used to be uniform random noise across all 139,255
   neurons, with nothing food-, water-, or danger-specific in it. An

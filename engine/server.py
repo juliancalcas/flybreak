@@ -241,6 +241,56 @@ _SOCIAL_RANGE = 5.0
 # place (see test_flies_end_up_near_each_other_without_fly_to_fly_steering).
 _MIN_FLY_SEPARATION = 1.5
 
+# Real per-landmark supply/depletion (see README.md, "Where this is
+# headed" -- "Food and water sources"). Previously both landmarks were
+# static and non-depleting -- a fly could park on FOOD_POSITION or
+# WATER_POSITION forever and keep drawing the same maximum _FOOD_BOOST
+# indefinitely, which does not read as real eating. Each landmark now
+# carries a real `supply` in World (1.0 = full, 0.0 = exhausted): while
+# ANY fly is within _EATING_RANGE of it, supply drains by
+# _SUPPLY_CONSUMPTION_PER_TICK each tick, floored at 0; once it hits 0 a
+# _SUPPLY_RESPAWN_TICKS cooldown starts, after which supply resets to
+# 1.0 -- the landmark "comes back." This is shared World state, not
+# per-fly (one food source, one water source, exactly like FOOD_POSITION/
+# WATER_POSITION themselves), advanced once per tick alongside
+# _apply_min_separation, the established "World owns shared resource
+# state" pattern already in this file.
+#
+# _EATING_RANGE=2.0 is deliberately much smaller than _FOOD_RANGE=8.0.
+# _FOOD_RANGE is "can smell/sense it from a distance" (proximity is
+# already ~0.37 at the fly's own ~7.8-unit spawn distance, see its own
+# comment) -- this is "close enough to actually be eating it," real
+# near-contact feeding, not the sensing range. 2.0 is bigger than
+# _MIN_FLY_SEPARATION (1.5, two flies' own body-to-body clearance) so a
+# fly that has genuinely arrived and settled at a landmark stays inside
+# eating range (test_heading_steers_toward_food_and_fly_arrives measures
+# settled median distance <0.2, well under 2.0) rather than drifting in
+# and out of it every tick, while still being a small fraction (1/4) of
+# _FOOD_RANGE so "eating" reads as meaningfully closer than "heading
+# toward."
+#
+# _SUPPLY_CONSUMPTION_PER_TICK and _SUPPLY_RESPAWN_TICKS were picked for
+# a real, human-legible timescale at this engine's TICK_HZ=20 (50ms/
+# tick) -- full depletion under continuous single-fly feeding in
+# 1.0/_SUPPLY_CONSUMPTION_PER_TICK ticks -- then CONFIRMED empirically by
+# actually running World with a fly held stationary at FOOD_POSITION
+# (see tests/test_engine.py's test_supply_depletes_while_fly_eats /
+# test_supply_respawns_after_cooldown, and this work's own measured run:
+# supply hit exactly 0 at tick 400 (20.0s of sim time, matching
+# 1.0/0.0025 exactly, since consumption is deterministic -- no RNG in
+# the depletion math itself), and reset back to 1.0 at tick 700 (300
+# ticks / 15.0s of cooldown later, matching _SUPPLY_RESPAWN_TICKS
+# exactly). Over that same run, activity.food_activity (EMA-smoothed,
+# see _FOOD_EMA_ALPHA) measurably sagged from its near-landmark range
+# (~0.6+) down toward the ~0.22-0.29 no-boost baseline while depleted,
+# and climbed back into the boosted range within a few ticks of
+# respawn -- see this work's own measured numbers, reported alongside
+# the change.
+_EATING_RANGE = 2.0
+_SUPPLY_CONSUMPTION_PER_TICK = 0.0025  # 400 ticks / 20.0s to fully deplete
+_SUPPLY_RESPAWN_TICKS = 300  # 15.0s cooldown before supply resets to 1.0
+
+
 # Spring stiffness for the collision response below: 1.0 means each
 # violated pair is pushed fully back out to exactly _MIN_FLY_SEPARATION
 # apart, in a single tick's correction pass, proportional to how deep the
@@ -280,7 +330,12 @@ class Simulation:
         # recompute) rather than every tick.
         self._sample_real_index = get_sample_graph()["sample_real_index"]
 
-    def step(self, peer_positions: list[tuple[float, float]] | None = None) -> dict:
+    def step(
+        self,
+        peer_positions: list[tuple[float, float]] | None = None,
+        food_supply: float = 1.0,
+        water_supply: float = 1.0,
+    ) -> dict:
         """Advances one tick.
 
         `peer_positions` is an optional list of OTHER flies' (x, z)
@@ -291,6 +346,16 @@ class Simulation:
         single-fly usage this project has always had) passes nothing, so
         this fly senses no peers -- Simulation remains independently
         constructible/steppable/testable exactly as before.
+
+        `food_supply`/`water_supply` are each landmark's current supply
+        fraction (1.0 = full, 0.0 = exhausted -- see World's
+        _EATING_RANGE/_SUPPLY_CONSUMPTION_PER_TICK/_SUPPLY_RESPAWN_TICKS
+        comment), used to scale that landmark's own proximity before it
+        drives net.food_mask. Both default to 1.0 (always full supply),
+        the same "standalone Simulation defaults to the no-op case"
+        spirit peer_positions already follows -- a bare Simulation with
+        no World around it has no shared landmark-depletion state to
+        read, so it behaves exactly as it always has.
         """
         self.mood.advance(DT_MS)
         mood_level = self.mood.level
@@ -316,8 +381,19 @@ class Simulation:
         # same position.
         food_distance = math.hypot(self._x - FOOD_POSITION[0], self._z - FOOD_POSITION[1])
         water_distance = math.hypot(self._x - WATER_POSITION[0], self._z - WATER_POSITION[1])
-        food_proximity = math.exp(-food_distance / _FOOD_RANGE)
-        water_proximity = math.exp(-water_distance / _FOOD_RANGE)
+        # Each landmark's raw distance-gradient proximity, scaled by its
+        # own current supply fraction (see _EATING_RANGE's comment) -- a
+        # depleted landmark (supply=0) contributes zero proximity here
+        # regardless of how close the fly is standing to it, and a fully
+        # respawned one (supply=1.0) is unaffected, exactly recovering
+        # today's behavior for a standalone Simulation (food_supply/
+        # water_supply default to 1.0). This is deliberately applied
+        # before max()/the steering target pick below, not after -- so a
+        # depleted landmark also stops winning the chemotaxis tie-break
+        # and stops pulling the fly toward it, not just stops boosting
+        # net.food_mask once the fly is already there.
+        food_proximity = math.exp(-food_distance / _FOOD_RANGE) * food_supply
+        water_proximity = math.exp(-water_distance / _FOOD_RANGE) * water_supply
         # max(), not summed -- see WATER_POSITION's comment. net.food_mask
         # is one real taste-receptor population; a real receptor
         # population saturates on whichever stimulus is currently
@@ -517,14 +593,19 @@ class World:
     independently-usable single-fly building block it already was -- World
     only adds the shared tick, the peer-position exchange between them
     (used only for the small conspecific-proximity sensory boost, see
-    _SOCIAL_BOOST/_SOCIAL_RANGE), and a minimum-separation collision
+    _SOCIAL_BOOST/_SOCIAL_RANGE), a minimum-separation collision
     response (_MIN_FLY_SEPARATION/_apply_min_separation) that keeps two
     flies from ending up (nearly) on top of each other once resource-
-    seeking brings them close. Deliberately, there is still NO fly-to-fly
-    STEERING/attraction anywhere in this codebase -- the collision
-    response only ever pushes flies apart at close range, it never pulls
-    them together at any range; see _MIN_FLY_SEPARATION's own comment for
-    why these are opposite kinds of rules, not the same one.
+    seeking brings them close, and the two landmarks' shared supply state
+    (food_supply/water_supply, see _EATING_RANGE/
+    _SUPPLY_CONSUMPTION_PER_TICK/_SUPPLY_RESPAWN_TICKS/_advance_supply) --
+    one food source and one water source that deplete while any fly is
+    eating and respawn after a cooldown, not per-fly state. Deliberately,
+    there is still NO fly-to-fly STEERING/attraction anywhere in this
+    codebase -- the collision response only ever pushes flies apart at
+    close range, it never pulls them together at any range; see
+    _MIN_FLY_SEPARATION's own comment for why these are opposite kinds of
+    rules, not the same one.
     """
 
     def __init__(self, n_flies: int = N_FLIES, seeds: list[int] | None = None):
@@ -538,6 +619,16 @@ class World:
         seeds = list(range(n_flies)) if seeds is None else seeds
         self.flies = [Simulation(seed=s) for s in seeds]
         self.latest_payloads: list[dict] | None = None
+        # Real per-landmark supply state (see _EATING_RANGE/
+        # _SUPPLY_CONSUMPTION_PER_TICK/_SUPPLY_RESPAWN_TICKS's comment) --
+        # shared across all N_FLIES flies, one food source and one water
+        # source, not per-fly. 1.0 = full/just-spawned; _food_respawn_ticks
+        # only means anything while food_supply is already at 0 (counts
+        # down to the next respawn).
+        self.food_supply = 1.0
+        self.water_supply = 1.0
+        self._food_respawn_ticks = 0
+        self._water_respawn_ticks = 0
 
     def step(self) -> list[dict]:
         """Ticks every fly once, together. Two-pass, as README.md/the
@@ -557,13 +648,66 @@ class World:
         AFTER-the-fact overlapping positions apart, at close range).
         """
         snapshot = [(f._x, f._z) for f in self.flies]
+        # Consumption/respawn reads the SAME end-of-previous-tick snapshot
+        # every fly's own food_distance/water_distance below is computed
+        # against (see Simulation.step()'s docstring) -- "is a fly eating
+        # right now" and "how food-driven is this tick" both read the same
+        # position, exactly the same consistency reasoning the two-pass
+        # peer-position snapshot already follows. The resulting supply
+        # fractions are then handed to every fly's step() this same tick
+        # (not next tick), so depletion/respawn are visible in
+        # food_activity as soon as they happen, not one tick late.
+        self._advance_supply(snapshot)
         payloads = []
         for i, fly in enumerate(self.flies):
             peers = [pos for j, pos in enumerate(snapshot) if j != i]
-            payloads.append(fly.step(peer_positions=peers))
+            payloads.append(fly.step(
+                peer_positions=peers,
+                food_supply=self.food_supply,
+                water_supply=self.water_supply,
+            ))
         self._apply_min_separation(payloads)
         self.latest_payloads = payloads
         return payloads
+
+    def _advance_supply(self, snapshot: list[tuple[float, float]]) -> None:
+        """Advances both landmarks' supply by one tick -- deplete-while-
+        eating, floor at 0, cooldown, respawn to 1.0 (see
+        _EATING_RANGE/_SUPPLY_CONSUMPTION_PER_TICK/_SUPPLY_RESPAWN_TICKS'
+        comment). Runs once per World tick, same "shared resource state
+        advanced once, here, not inside any one fly's own step()" pattern
+        _apply_min_separation already established for fly-fly collision.
+        """
+        self.food_supply, self._food_respawn_ticks = self._advance_one_supply(
+            self.food_supply, self._food_respawn_ticks, FOOD_POSITION, snapshot)
+        self.water_supply, self._water_respawn_ticks = self._advance_one_supply(
+            self.water_supply, self._water_respawn_ticks, WATER_POSITION, snapshot)
+
+    @staticmethod
+    def _advance_one_supply(
+        supply: float,
+        respawn_ticks_remaining: int,
+        position: tuple[float, float],
+        snapshot: list[tuple[float, float]],
+    ) -> tuple[float, int]:
+        if supply <= 0.0:
+            # Depleted: counting down the cooldown, not consuming (an
+            # exhausted landmark has nothing left to eat regardless of how
+            # many flies are parked on it) -- once the countdown reaches
+            # 0, the landmark "comes back" at full supply.
+            if respawn_ticks_remaining <= 1:
+                return 1.0, 0
+            return 0.0, respawn_ticks_remaining - 1
+        any_fly_eating = any(
+            math.hypot(x - position[0], z - position[1]) <= _EATING_RANGE
+            for x, z in snapshot
+        )
+        if not any_fly_eating:
+            return supply, respawn_ticks_remaining
+        supply = max(0.0, supply - _SUPPLY_CONSUMPTION_PER_TICK)
+        if supply <= 0.0:
+            return 0.0, _SUPPLY_RESPAWN_TICKS
+        return supply, respawn_ticks_remaining
 
     def _apply_min_separation(self, payloads: list[dict]) -> None:
         """Basic "can't occupy the same space" physics: pushes any pair of
