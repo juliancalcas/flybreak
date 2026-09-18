@@ -112,7 +112,17 @@ python -m engine.server            # ws://127.0.0.1:8765, one shared World (3 fl
 - `schema_v1.json` -- JSON Schema for one tick, matching the shape agreed
   in the project brief (`schema_version`, `tick`, `sim_time_ms`,
   `stimulus`, `activity`, `motor_state`, `meta`, `world`). Currently
-  `"1.5"` -- bumped from `"1.4"` when `activity.sample_spikes` (array of
+  `"1.6"` -- bumped from `"1.5"` when `activity.food_supply`/
+  `activity.water_supply` (each a plain `0..1` number, required) were
+  added: a real, exact, zero-smoothing/zero-noise read of `World.food_
+  supply`/`water_supply` (see "Food and water sources" below) -- a clean
+  monotonic ramp down while a landmark depletes and a clean snap back to
+  1.0 on respawn, unlike the existing `activity.food_activity` (EMA-
+  smoothed real spike-fraction noise stacked on top of that same
+  supply-gated proximity, which on its own read as "goes up and down
+  strangely" to someone watching for "is the food running out" -- real
+  user feedback running the app). `"1.5"` was bumped from `"1.4"` when
+  `activity.sample_spikes` (array of
   local sample-graph ids that spiked this tick) was added, alongside the
   new, separate `schema_graph_v1.json` for the one-time `synapse_graph`
   message (see "The live synapse sample" below). `"1.4"` was bumped from
@@ -252,6 +262,25 @@ boosted range), visual_mask baseline ~0.273 rising to ~0.337 with a peer
 nearby (matching the previously measured ~0.272-0.274 baseline / ~0.344
 boosted numbers almost exactly) -- nothing broke.
 
+**Correction (a later work cycle, prompted by real user feedback running the
+app: flies almost never actually reached `action == "flying"`)**: that
+spot check only sampled ONE mid-range mood_level point, which happened to
+still land inside the old 0.31-0.58 window -- it did not catch that the
+window's own EDGES had moved. Re-running the *original* calibration's own
+methodology unchanged (60-tick runs, seed 0, first 10 ticks dropped,
+`LIFNetwork` driven directly with only the baseline noise `drive`, no food/
+social boost) across the mood_level sweep now measures ~0.36 (mood_level 0)
+to ~0.49 (mood_level 1) -- the real range genuinely narrowed on both ends
+after this switch (this direct-drive measurement has no food/water-
+depletion code in its path at all, so the depletion mechanic added around
+the same time is not the cause here). This is why `motor_state.action`
+almost never reached `"flying"` (`activity_norm > 0.8`): `_MOTOR_ACTIVITY_
+MAX` was still calibrated to the old ~0.58 ceiling, but the real one had
+moved to ~0.51 (see the next paragraph), so the rescaled `activity_norm`
+could reach ~0.70 at best and never further. See `engine/server.py`'s
+`_MOTOR_ACTIVITY_MIN`/`_MOTOR_ACTIVITY_MAX` comment for the full real
+recalibration this produced (now 0.36/0.51).
+
 Synapse-count weight is capped (median 6, mean 8.8, max 2405 in the real
 data) so a handful of outlier connections cannot dominate a tick.
 
@@ -265,11 +294,21 @@ on the full network, comfortably inside a 20 Hz tick's 50ms budget.
 The motor+descending pathway (`net.motor_mask`, FlyWire's own `super_class`
 values `motor` and `descending` -- 110 + 1305 = 1415 neurons) is what
 `server.py` actually reads for `motor_state`, not the single `motor`
-category `active_regions` reports on its own. Its per-tick activity
-ranges roughly 0.31–0.58 across the full `mood_level` sweep, with
-tick-to-tick noise (std ~0.03) large enough relative to that span that
-`server.py` smooths it with an EMA before deriving `action`/`speed` --
-see its own comments for the measured numbers.
+category `active_regions` reports on its own. Its raw per-tick activity
+(baseline noise only, no food/social boost) ranges roughly 0.36-0.49
+across the full `mood_level` sweep as the real connectome stands today
+(re-measured after the per-neuron NT sign-assignment switch above; was
+~0.31-0.58 before it -- see the correction above), with tick-to-tick noise
+(std ~0.03-0.05) large enough relative to that span that `server.py`
+smooths it with an EMA before deriving `action`/`speed`. The real range
+`self._motor_ema` (the EMA'd value) actually reaches during real gameplay
+-- which also includes the food/water proximity boost and conspecific
+visual boost, both added after the original 0.31-0.58 number -- runs
+roughly 0.36 (worst case: unstimulated, no peer, far from both landmarks)
+to 0.51 (best case: `mood_level=1`, parked on a full-supply landmark, a
+peer at distance 0) -- see `_MOTOR_ACTIVITY_MIN`/`_MOTOR_ACTIVITY_MAX`'s
+own comment in `server.py` for the full methodology and the "Fly action/
+flying" section below for what this range is now calibrated against.
 
 `net.food_mask` (FlyWire's finer-grained `class`/`sub_class` columns this
 time, not `super_class`: `class == "gustatory"`, `sub_class ==
@@ -407,10 +446,27 @@ leaves out, honestly, follows each.
   of `heading_deg`/`speed`; the engine itself had zero concept of where
   the fly was. Position advances every tick the same way that client-side
   code always did (`x += sin(heading) * speed * STEP`), reported as
-  `motor_state.position` (`{"x", "z"}`, schema `"1.3"`+). Still narrow:
-  no obstacles or collision (between flies or landmarks), no boundaries
-  at all (a fly can wander arbitrarily far if it hasn't picked up either
-  landmark's scent yet).
+  `motor_state.position` (`{"x", "z"}`, schema `"1.3"`+). A bare,
+  standalone `Simulation` still spawns at `(0.0, 0.0)` by default (the
+  `spawn` kwarg, matching the frontend's fly spawn point exactly), same
+  "standalone stays as before" spirit `peer_positions`/`food_supply`
+  already follow. `World` (see "Multiple flies" below) instead gives each
+  of its `N_FLIES` flies its own small, distinct spawn offset, by INDEX in
+  `World.flies` (not by seed) -- real user feedback running the app: all 3
+  flies spawning at the exact same point read as a "pop apart" glitch on
+  the first few ticks, not 3 distinct flies. `_spawn_offset`/
+  `_SPAWN_RADIUS` spread them evenly around a circle of radius 1.5 units
+  (`_SPAWN_RADIUS`, deliberately equal to `_MIN_FLY_SEPARATION` -- see
+  its own comment for the real trig and why), giving every pair of flies
+  a real ~2.60-unit starting separation: comfortably above
+  `_MIN_FLY_SEPARATION` (so the collision response below has nothing to
+  correct on tick 1) and well inside `_SOCIAL_RANGE`/`_FOOD_RANGE` (5.0/
+  8.0), so the 3 flies still start "together" narratively, just not
+  literally coincident. No RNG needed -- deterministic by index, same
+  "determinism where it's free" style as `_apply_min_separation`'s own
+  coincidence-fallback angle. Still narrow: no obstacles or collision with
+  landmarks, no boundaries at all (a fly can wander arbitrarily far if it
+  hasn't picked up either landmark's scent yet).
 - **Food and water sources**: `FOOD_POSITION` (`(6, 5)`, matching the
   frontend's existing prop) and `WATER_POSITION` (`(-6, -5)`, the
   diagonally opposite quadrant, same ~7.81-unit distance from spawn) are
@@ -451,19 +507,32 @@ leaves out, honestly, follows each.
   `World` state -- one food source, one water source, not per-fly --
   advanced once per tick alongside `_apply_min_separation`, the same
   "World owns shared resource state" pattern that collision response
-  already established. It rides entirely on the existing
-  `activity.food_activity` field (no schema change): each landmark's raw
-  distance-gradient proximity is scaled by its own current supply
-  fraction (`effective_proximity = raw_proximity * supply_fraction`)
-  before it drives `net.food_mask`'s boost, so a depleted landmark's
-  contribution genuinely fades toward the ~0.22-0.29 no-boost baseline
-  even while a fly sits right on top of it, and genuinely climbs back
-  once the landmark respawns. `Simulation.step()` takes optional
-  `food_supply`/`water_supply` keyword args (each defaulting to 1.0,
-  same "standalone-usage default" spirit `peer_positions` already
-  follows) so `Simulation` stays independently constructible/testable
-  with no `World` around it; `World.step()` reads its own
-  `food_supply`/`water_supply` and passes them to every fly each tick.
+  already established. Each landmark's raw distance-gradient proximity is
+  scaled by its own current supply fraction (`effective_proximity =
+  raw_proximity * supply_fraction`) before it drives `net.food_mask`'s
+  boost, so a depleted landmark's contribution genuinely fades toward the
+  ~0.22-0.29 no-boost baseline even while a fly sits right on top of it,
+  and genuinely climbs back once the landmark respawns -- reported via the
+  existing (EMA-smoothed) `activity.food_activity` field. `Simulation.
+  step()` takes optional `food_supply`/`water_supply` keyword args (each
+  defaulting to 1.0, same "standalone-usage default" spirit
+  `peer_positions` already follows) so `Simulation` stays independently
+  constructible/testable with no `World` around it; `World.step()` reads
+  its own `food_supply`/`water_supply` and passes them to every fly each
+  tick.
+
+  Schema `"1.6"` additionally exposes `activity.food_supply`/
+  `activity.water_supply` directly -- the real `World.food_supply`/
+  `water_supply` values passed into `Simulation.step()` above, straight
+  through with zero smoothing or spike noise (unlike `food_activity`,
+  which stacks real EMA'd spike-fraction noise on top of this same
+  supply-gated proximity, and on its own read as "goes up and down
+  strangely" to a viewer watching for "is the food running out" -- real
+  user feedback running the app: "el hambre baja y sube extrañamente, no
+  es como que baje en cuestion de segundos normalmente"). A clean,
+  monotonic ramp down while a landmark depletes, a clean snap back to 1.0
+  on respawn -- both default to 1.0 for a bare, standalone `Simulation`,
+  same spirit as the `food_supply`/`water_supply` kwargs themselves.
 
   Empirically measured (`World(n_flies=1)`, one fly held continuously at
   `FOOD_POSITION`, TICK_HZ=20): supply hits 0 at tick 401 (~20.1s of sim

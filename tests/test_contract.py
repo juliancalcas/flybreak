@@ -4,7 +4,7 @@ import pytest
 from contract.validator import is_valid_graph, is_valid_tick, validate_graph, validate_tick
 
 VALID_TICK = {
-    "schema_version": "1.5",
+    "schema_version": "1.6",
     "tick": 4821,
     "sim_time_ms": 300,
     "stimulus": {"mood_level": 0.72, "other_inputs": {}},
@@ -17,6 +17,8 @@ VALID_TICK = {
             {"region": "optic", "activity": 0.15},
         ],
         "food_activity": 0.63,
+        "food_supply": 0.81,
+        "water_supply": 0.47,
         "sample_spikes": [3, 17, 42],
     },
     "motor_state": {
@@ -57,6 +59,28 @@ def test_food_activity_out_of_range_rejected():
 
 def test_food_activity_missing_rejected():
     activity = {k: v for k, v in VALID_TICK["activity"].items() if k != "food_activity"}
+    tick = {**VALID_TICK, "activity": activity}
+    assert not is_valid_tick(tick)
+
+
+def test_food_supply_out_of_range_rejected():
+    tick = {**VALID_TICK, "activity": {**VALID_TICK["activity"], "food_supply": 1.2}}
+    assert not is_valid_tick(tick)
+
+
+def test_food_supply_missing_rejected():
+    activity = {k: v for k, v in VALID_TICK["activity"].items() if k != "food_supply"}
+    tick = {**VALID_TICK, "activity": activity}
+    assert not is_valid_tick(tick)
+
+
+def test_water_supply_out_of_range_rejected():
+    tick = {**VALID_TICK, "activity": {**VALID_TICK["activity"], "water_supply": -0.1}}
+    assert not is_valid_tick(tick)
+
+
+def test_water_supply_missing_rejected():
+    activity = {k: v for k, v in VALID_TICK["activity"].items() if k != "water_supply"}
     tick = {**VALID_TICK, "activity": activity}
     assert not is_valid_tick(tick)
 

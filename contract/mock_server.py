@@ -96,6 +96,23 @@ def _mock_tick(tick: int, sim_time_ms: float, mood_level: float) -> dict:
     # frontend built against the mock sees a realistic value before ever
     # touching the real engine.
     food_activity = 0.3 + 0.35 * ((math.sin(t * 0.3 + 3.0) + 1) / 2)
+    # plausible stand-in for the real engine's activity.food_supply/
+    # water_supply (schema "1.6" -- see server.py's World.food_supply/
+    # water_supply and its _advance_one_supply: a clean, exact, monotonic
+    # ramp down while depleting, then a clean snap back to 1.0 on respawn,
+    # zero smoothing/noise, unlike food_activity above). The mock has no
+    # World/supply state to read, so this is a real synthetic sawtooth --
+    # ramps linearly from 1.0 down to 0.0 over a fixed real period, then
+    # snaps straight back to 1.0 -- clearly synthetic (an exact repeating
+    # triangle-down/vertical-up shape), not modeling real depletion timing,
+    # but in the same "plausible stand-in" spirit as this file's other
+    # fields. food_supply/water_supply use different periods and a phase
+    # offset so a frontend built against this mock sees them depleting and
+    # respawning independently, not in lockstep.
+    _FOOD_SUPPLY_PERIOD_S = 20.0
+    _WATER_SUPPLY_PERIOD_S = 27.0
+    food_supply = 1.0 - (t % _FOOD_SUPPLY_PERIOD_S) / _FOOD_SUPPLY_PERIOD_S
+    water_supply = 1.0 - ((t + _WATER_SUPPLY_PERIOD_S / 2.0) % _WATER_SUPPLY_PERIOD_S) / _WATER_SUPPLY_PERIOD_S
     # plausible stand-in for the real engine's activity.sample_spikes (see
     # server.py's Simulation.step()) -- the mock has no LIF network or
     # real sample to look real spikes up in, so this just draws a handful
@@ -138,7 +155,7 @@ def _mock_tick(tick: int, sim_time_ms: float, mood_level: float) -> dict:
         },
     ]
     return {
-        "schema_version": "1.5",
+        "schema_version": "1.6",
         "tick": tick,
         "sim_time_ms": sim_time_ms,
         "stimulus": {"mood_level": mood_level, "other_inputs": {}},
@@ -147,6 +164,8 @@ def _mock_tick(tick: int, sim_time_ms: float, mood_level: float) -> dict:
             "firing_rate_hz": random.uniform(0, 400),
             "active_regions": active_regions,
             "food_activity": food_activity,
+            "food_supply": food_supply,
+            "water_supply": water_supply,
             "sample_spikes": sample_spikes,
         },
         "motor_state": {

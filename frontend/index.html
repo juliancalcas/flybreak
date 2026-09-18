@@ -32,6 +32,7 @@
   .region-bar-track { background: rgba(120,255,170,0.12); border-radius: 3px; height: 5px; margin: 3px 0 6px; overflow: hidden; }
   .region-bar-fill { background: #5affa0; height: 100%; transition: width 0.15s linear; }
   .food-bar-fill { background: #ff9d3d; }
+  .water-bar-fill { background: #4ad8ff; }
 
   #status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 6px; }
   .status-connected { background: #5affa0; box-shadow: 0 0 6px #5affa0; }
@@ -88,6 +89,8 @@
       <div class="row"><span class="label">wing</span><span id="wing">-</span></div>
       <div class="row"><span class="label">food</span><span id="food-value">-</span></div>
       <div class="region-bar-track"><div class="region-bar-fill food-bar-fill" id="food-bar" style="width:0%"></div></div>
+      <div class="row"><span class="label">water</span><span id="water-value">-</span></div>
+      <div class="region-bar-track"><div class="region-bar-fill water-bar-fill" id="water-bar" style="width:0%"></div></div>
     </div>
 
     <div class="panel regions">
@@ -173,9 +176,33 @@
     document.getElementById("action").textContent = tick.motor_state.action;
     document.getElementById("wing").textContent = tick.motor_state.wing_state;
 
-    const foodPct = Math.round(tick.activity.food_activity * 100);
+    // activity.food_supply/water_supply (schema "1.6"): the engine's exact
+    // real shared-landmark supply state, zero smoothing/noise -- unlike
+    // food_activity (an EMA-smoothed real spike-fraction signal, still
+    // real, just noisy on top of supply), these are the clean, monotonic
+    // "how much is actually left" numbers, and are now the PRIMARY driver
+    // of both the HUD readout below and each landmark's own baseline
+    // visibility (see the food/water pulse block in animate()) -- fixing
+    // the real user report that hunger "goes up and down strangely"
+    // instead of dropping smoothly like a real depleting resource.
+    // food_activity is kept as a secondary, faster-timescale flicker
+    // layered on top of that baseline, not the primary signal anymore.
+    // Older engines/mocks not yet on schema "1.6" won't send these fields
+    // at all -- fall back to a constant "full" (1.0) so nothing regresses
+    // (no depletion concept existed before this, so "always full" matches
+    // that prior behavior exactly) rather than guessing from the noisy
+    // food_activity signal.
+    foodSupplyTarget = (typeof tick.activity.food_supply === "number")
+      ? THREE.MathUtils.clamp(tick.activity.food_supply, 0, 1) : 1;
+    waterSupplyTarget = (typeof tick.activity.water_supply === "number")
+      ? THREE.MathUtils.clamp(tick.activity.water_supply, 0, 1) : 1;
+
+    const foodPct = Math.round(foodSupplyTarget * 100);
     document.getElementById("food-value").textContent = foodPct + "%";
     document.getElementById("food-bar").style.width = foodPct + "%";
+    const waterPct = Math.round(waterSupplyTarget * 100);
+    document.getElementById("water-value").textContent = waterPct + "%";
+    document.getElementById("water-bar").style.width = waterPct + "%";
     foodActivity = tick.activity.food_activity;
 
     // each landmark's own real proximity to the fly's actual position
@@ -317,20 +344,44 @@
     return SYNAPSE_NODE_COLOR.neutral;
   }
 
-  // base point sizes, shrunk from the first pass (0.16 / 0.1) -- smaller
-  // points overlap less at real 1000-node density, which is most of what
-  // keeps individual colors from bleeding into each other once several
-  // cluster close together (paired with the glow/blending tuning above).
-  const SYNAPSE_SIZE_FLAGGED = 0.115;
-  const SYNAPSE_SIZE_UNFLAGGED = 0.075;
-  const SYNAPSE_SIZE_FLASH_BOOST = 0.16; // extra size on a full spike flash
+  // base point sizes. A first pass shrunk these (0.16/0.1 -> 0.115/0.075)
+  // and tuned down glow/blend intensity, and it was NOT enough -- real user
+  // testing still saw one flare, not distinguishable per-node colors
+  // ("todavia esta el flare", the SECOND time this exact complaint was
+  // raised). Shrinking points/lowering alpha only ever reduces how BADLY
+  // additive blending saturates -- it can't fix it, because additive
+  // blending mathematically sums every overlapping point's RGB toward
+  // white regardless of how low each individual point's alpha is, as long
+  // as enough of them stack on the same pixel (and at ~1000 real nodes in
+  // a small cloud, they do, especially in the bigger "other"/neutral
+  // cluster). That's the actual root cause, not a tuning problem -- so
+  // this time the material itself changed (see makeSynapsePointsMaterial:
+  // THREE.NormalBlending, not Additive) instead of nudging these same
+  // constants again. With stacking-to-white no longer possible, sizes are
+  // kept close to the previous pass's (real testing, see below, showed
+  // these still read as legible, soft-edged points rather than solid
+  // discs) plus real extra layout spacing (see computeSynapseLayout) so
+  // fewer points are adjacent in the first place.
+  const SYNAPSE_SIZE_FLAGGED = 0.1;
+  const SYNAPSE_SIZE_UNFLAGGED = 0.062;
+  const SYNAPSE_SIZE_FLASH_BOOST = 0.1; // extra size on a full spike flash
   // a spike flash no longer lerps all the way to the flash color -- at full
   // strength it used to fully replace the category color with near-white,
   // which (at real tick rates, several nodes flashing at once) read as
   // random white blobs unrelated to category color. Capped so the flash
   // still reads as a highlight (brighter, bigger) without erasing which
   // category the node belongs to.
-  const SYNAPSE_FLASH_MAX_LERP = 0.55;
+  const SYNAPSE_FLASH_MAX_LERP = 0.45;
+  // hard cap on how many nodes are allowed to sit at a strong flash
+  // simultaneously -- even with NormalBlending (no more additive white-
+  // out), dozens of nodes all flashing toward SYNAPSE_FLASH_COLOR at once
+  // would still visually read as "everything just went bright/white-ish
+  // together", which is the same complaint by a different mechanism. If
+  // more than this many nodes are above the "strong" threshold in one
+  // tick, the weakest of that group are pulled back down so only the
+  // strongest few genuinely pop.
+  const SYNAPSE_MAX_SIMULTANEOUS_STRONG_FLASH = 24;
+  const SYNAPSE_STRONG_FLASH_THRESHOLD = 0.5;
 
   // deterministic, non-random layout: cluster nodes by their real `region`
   // string, place clusters evenly around a ring (sorted region names, so
@@ -370,11 +421,18 @@
     }
     const regions = Array.from(byRegion.keys()).sort();
     const layout = new Array(graph.nodes.length);
-    const clusterCenterR = 0.5;
+    // both radii widened vs. the first pass (0.5 / 0.14-0.36) -- a real,
+    // structural reduction in how many points land adjacent to each other,
+    // not just smaller points on the same layout. This is the "adjusting
+    // the layout algorithm's cluster spacing" fix, done alongside the
+    // blending-mode change above rather than instead of it: even under
+    // NormalBlending, a genuinely denser-than-necessary cloud still reads
+    // muddier than it needs to where clusters overlap.
+    const clusterCenterR = 0.62;
     regions.forEach((region, ri) => {
       const center = fibonacciSpherePoint(ri, regions.length, clusterCenterR);
       const members = byRegion.get(region);
-      const clusterR = Math.max(0.14, Math.min(0.36, 0.06 + members.length * 0.009));
+      const clusterR = Math.max(0.17, Math.min(0.46, 0.08 + members.length * 0.011));
       members.forEach((nodeIdx, mi) => {
         const frac = (mi + 0.5) / members.length;
         const p = fibonacciSpherePoint(mi, members.length, clusterR * Math.cbrt(frac));
@@ -385,23 +443,30 @@
   }
 
   // a soft circular glow sprite, drawn once at startup via an offscreen
-  // canvas radial gradient (no external image fetch) -- THREE.Points +
-  // this + AdditiveBlending is what makes overlapping nodes bloom into
-  // soft volumetric-looking clusters, same trick the reference look uses.
-  // Tightened vs. the first pass (smaller solid core, faster falloff, lower
-  // peak alpha) -- the original spread too wide/bright and, once many
-  // overlapping additive points stacked up, saturated every color to the
-  // same white flare instead of reading as distinct per-node hues (real
-  // user report: "solo se ven como un flare"). This still glows -- it just
-  // doesn't blow out to white as quickly when points cluster.
+  // canvas radial gradient (no external image fetch) -- THREE.Points + this
+  // is what gives each node a soft, glowing (not a hard flat disc) look.
+  // A first pass tightened this gradient (smaller core, faster falloff,
+  // lower peak alpha) while still using AdditiveBlending, and real user
+  // testing showed it was NOT enough: the cloud still read as one flare.
+  // That's because the actual root cause was never this gradient's shape --
+  // it was AdditiveBlending itself (see makeSynapsePointsMaterial): additive
+  // blending sums every overlapping point's color toward white, and at real
+  // ~1000-node density enough points stack on the same pixel that no amount
+  // of lowering this gradient's alpha prevents that sum from saturating.
+  // Now that the material uses THREE.NormalBlending instead (ordinary
+  // alpha-over compositing, which does not sum toward white no matter how
+  // many points overlap), this gradient can go back to being a normal,
+  // reasonably solid/opaque core with a soft falloff -- exactly what
+  // "glowing but still shows its real category color" needs.
   function makeGlowSprite() {
     const size = 64;
     const c = document.createElement("canvas");
     c.width = c.height = size;
     const ctx = c.getContext("2d");
     const g = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
-    g.addColorStop(0, "rgba(255,255,255,0.85)");
-    g.addColorStop(0.22, "rgba(255,255,255,0.4)");
+    g.addColorStop(0, "rgba(255,255,255,1)");
+    g.addColorStop(0.35, "rgba(255,255,255,0.9)");
+    g.addColorStop(0.75, "rgba(255,255,255,0.35)");
     g.addColorStop(1, "rgba(255,255,255,0)");
     ctx.fillStyle = g;
     ctx.fillRect(0, 0, size, size);
@@ -428,14 +493,27 @@
   // (no per-vertex size support), so a small custom ShaderMaterial is used
   // instead -- lets each point's real size (bigger for is_food/is_motor/
   // is_visual, and growing further on a real spike flash) and real color
-  // both vary per-vertex while keeping the soft sprite + additive glow.
-  // point size (the 190.0 constant, was 260.0) and glow intensity (the
-  // 0.72 alpha multiplier below) are both tuned down from the first pass:
-  // at 1000 real nodes packed into a small cloud, the original size/glow
-  // combo overlapped so much that additive blending stacked every color up
-  // to white and the whole cloud read as one flare instead of distinct
-  // per-node colors. Still real glow (soft sprite + additive), just no
-  // longer strong enough to wash out into white where points cluster.
+  // both vary per-vertex while keeping the soft glow sprite.
+  //
+  // THE REAL FIX (this pass): blending is THREE.NormalBlending, not
+  // THREE.AdditiveBlending. Two earlier passes tuned down point size and
+  // glow/alpha intensity under AdditiveBlending and real user testing
+  // (twice now) still saw one white-ish flare instead of distinguishable
+  // per-node colors -- because additive blending is fundamentally the
+  // wrong tool here, not merely mistuned: it sums every overlapping
+  // point's RGB, so `finalColor = sum(color_i * alpha_i)` over every point
+  // stacked on a pixel. At real ~1000-node density, enough points overlap
+  // on the same pixels that this sum saturates every channel toward 1.0
+  // (white) regardless of how low any single point's alpha is -- lowering
+  // alpha only raises the number of overlapping points it takes to
+  // saturate, it can never make saturation stop happening where the cloud
+  // is genuinely dense (see computeSynapseLayout's cluster centers, which
+  // is exactly where density is highest by construction). NormalBlending
+  // (ordinary source-over alpha compositing, `result = src*a + dst*(1-a)`)
+  // cannot sum past 1.0 no matter how many points overlap -- at worst a
+  // pixel shows whichever point(s) are nearest/topmost, still that point's
+  // real category color, never a blown-out white sum. This is what
+  // actually stops the flare, not another size/alpha nudge.
   function makeSynapsePointsMaterial() {
     return new THREE.ShaderMaterial({
       uniforms: { pointTexture: { value: synapseGlowTex } },
@@ -455,12 +533,16 @@
         varying vec3 vColor;
         void main() {
           vec4 tex = texture2D(pointTexture, gl_PointCoord);
-          gl_FragColor = vec4(vColor, 1.0) * tex * 0.72;
+          // alpha can run close to fully opaque at the core now -- under
+          // NormalBlending that just means "this point's real color wins
+          // at its own core", not "this stacks toward white with its
+          // neighbors" (see the blending-mode comment above).
+          gl_FragColor = vec4(vColor, tex.a * 0.95);
         }
       `,
       transparent: true,
       depthWrite: false,
-      blending: THREE.AdditiveBlending,
+      blending: THREE.NormalBlending,
     });
   }
 
@@ -536,10 +618,14 @@
     // deliberately subtle -- points+glow (see makeSynapsePointsMaterial)
     // are what reads as "the graph" now, real edges are just faint connective
     // texture threading through the cloud, not the dominant visual language
-    // the old flat node-link diagram used to be.
+    // the old flat node-link diagram used to be. NormalBlending here too
+    // (matching the point material's fix above) -- with ~1000+ edge
+    // segments also threading through the same dense cloud, additive
+    // blending would stack these toward white exactly the same way it did
+    // for points, undermining the node-color fix with washed-out line glow.
     const linesMat = new THREE.LineBasicMaterial({
-      vertexColors: true, transparent: true, opacity: 0.3,
-      blending: THREE.AdditiveBlending, depthWrite: false,
+      vertexColors: true, transparent: true, opacity: 0.55,
+      blending: THREE.NormalBlending, depthWrite: false,
     });
     synapseLines = new THREE.LineSegments(synapseLinesGeo, linesMat);
     synapseGroup.add(synapseLines);
@@ -568,7 +654,34 @@
         }
       }
     }
+    capSimultaneousStrongFlashes();
     renderSynapseFrame();
+  }
+
+  // caps how many nodes can sit at a "strong" flash at once (see
+  // SYNAPSE_MAX_SIMULTANEOUS_STRONG_FLASH's comment) -- a real tick can
+  // carry more simultaneous spikes than that (sample_spikes has no upper
+  // bound guarantee), and even under NormalBlending, dozens of nodes all
+  // popping bright together at once reads as "the cloud just went bright"
+  // rather than as individually legible events. When over the cap, the
+  // weakest strong flashes (not the strongest -- the freshest/most salient
+  // spikes should still read clearly) are pulled back down to just under
+  // the "strong" threshold so they still show *a* flash, just not one that
+  // competes with the genuinely strongest ones for attention.
+  function capSimultaneousStrongFlashes() {
+    let strongIdx = null;
+    for (let i = 0; i < nodeFlash.length; i++) {
+      if (nodeFlash[i] >= SYNAPSE_STRONG_FLASH_THRESHOLD) {
+        if (!strongIdx) strongIdx = [];
+        strongIdx.push(i);
+      }
+    }
+    if (!strongIdx || strongIdx.length <= SYNAPSE_MAX_SIMULTANEOUS_STRONG_FLASH) return;
+    strongIdx.sort((a, b) => nodeFlash[a] - nodeFlash[b]); // weakest first
+    const excess = strongIdx.length - SYNAPSE_MAX_SIMULTANEOUS_STRONG_FLASH;
+    for (let i = 0; i < excess; i++) {
+      nodeFlash[strongIdx[i]] = SYNAPSE_STRONG_FLASH_THRESHOLD * 0.85;
+    }
   }
 
   function renderSynapseFrame() {
@@ -626,6 +739,64 @@
   const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 500);
   camera.position.set(0, 6, 10);
   camera.lookAt(ORIGIN);
+
+  // ---- camera zoom: mouse wheel + pinch, real user control over distance
+  // from whatever point the camera is currently orbiting/looking at (the
+  // fly, once it exists -- ORIGIN before that). The auto-orbit motion below
+  // (the sin/cos sweep in animate()) is left completely alone -- it still
+  // computes the exact same orbit *direction*/angle/speed it always has;
+  // this only scales the resulting offset vector from the look-at target,
+  // so zoom changes distance, never the orbit's angle or speed. Previously
+  // there was NO zoom control at all (real user report: "Quiero poder
+  // hacer zoom in y out").
+  //   zoomMultiplier == 1 reproduces the exact original fixed distance/
+  //   shape; <1 is closer, >1 is farther. Clamped so scrolling can't push
+  //   the camera through the fly (min) or so far out the scene stops
+  //   making sense (max, still well inside the city's ~85-unit radius).
+  let zoomMultiplier = 1.0;
+  const ZOOM_MULT_MIN = 0.28; // ~ closest: a few units from the fly, no clipping
+  const ZOOM_MULT_MAX = 3.5;  // ~ farthest: still inside the wireframe city, not past it
+  const ZOOM_WHEEL_SENSITIVITY = 0.0016; // multiplicative change per deltaY unit
+  const ZOOM_PINCH_SENSITIVITY = 1.0;    // 1:1 with pinch distance ratio
+
+  function applyZoom(factor) {
+    zoomMultiplier = THREE.MathUtils.clamp(zoomMultiplier * factor, ZOOM_MULT_MIN, ZOOM_MULT_MAX);
+  }
+
+  container.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    // deltaY > 0 (scroll down / away) zooms out, < 0 (scroll up / toward
+    // the user) zooms in -- the conventional direction for a scene camera.
+    applyZoom(1 + e.deltaY * ZOOM_WHEEL_SENSITIVITY);
+  }, { passive: false });
+
+  // pinch-to-zoom for touchscreens: tracks the distance between the two
+  // active touch points frame-to-frame and converts its change into the
+  // same zoomMultiplier the wheel handler drives -- fingers moving apart
+  // (pinch-out) zooms in, fingers moving together (pinch-in) zooms out.
+  let pinchStartDist = null;
+  function touchPairDistance(touches) {
+    const dx = touches[0].clientX - touches[1].clientX;
+    const dy = touches[0].clientY - touches[1].clientY;
+    return Math.sqrt(dx * dx + dy * dy);
+  }
+  container.addEventListener("touchstart", (e) => {
+    if (e.touches.length === 2) pinchStartDist = touchPairDistance(e.touches);
+  }, { passive: true });
+  container.addEventListener("touchmove", (e) => {
+    if (e.touches.length === 2 && pinchStartDist) {
+      e.preventDefault();
+      const dist = touchPairDistance(e.touches);
+      if (dist > 0 && pinchStartDist > 0) {
+        applyZoom(1 + (pinchStartDist / dist - 1) * ZOOM_PINCH_SENSITIVITY);
+      }
+      pinchStartDist = dist;
+    }
+  }, { passive: false });
+  container.addEventListener("touchend", (e) => {
+    if (e.touches.length < 2) pinchStartDist = null;
+  });
+  container.addEventListener("touchcancel", () => { pinchStartDist = null; });
 
   const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
   renderer.setPixelRatio(window.devicePixelRatio);
@@ -966,9 +1137,14 @@
   }
 
   // ---- landmarks: food (existing) + water (new) ----
-  // Both drive off the one real net.food_mask channel (tick.activity.food_activity
-  // -- see server.py's WATER_POSITION comment: the connectome has no separate
-  // "water" neuron population, so there is no separate water_activity field).
+  // Baseline visibility/size/opacity (below, in animate()) is now PRIMARILY
+  // driven by activity.food_supply/water_supply -- the engine's clean,
+  // unsmoothed, monotonic real supply state (schema "1.6") -- with the
+  // older single real net.food_mask channel (tick.activity.food_activity;
+  // see server.py's WATER_POSITION comment: the connectome has no separate
+  // "water" neuron population, so there has never been a separate
+  // water_activity field) kept only as a secondary, faster-timescale
+  // flicker on top, same real signal it always was.
   const FOOD_POSITION = { x: 6, z: 5 };
   const WATER_POSITION = { x: -6, z: -5 };
 
@@ -987,6 +1163,33 @@
   let foodActivity = 0.3; // baseline noise floor until the first tick arrives
   let foodProximity = 0;
   let waterProximity = 0;
+
+  // clean supply state (activity.food_supply/water_supply, schema "1.6"):
+  // *Target* is the latest real value straight off the wire, updated once
+  // per tick in renderHud(). *Display* is eased toward it every animated
+  // frame (SUPPLY_LERP below) purely to smooth the visible ~20Hz tick step
+  // into ~60fps rendering -- NOT the kind of smoothing that created the
+  // original "goes up and down strangely" bug (that was noise layered on
+  // top of the signal via an EMA of spike fraction; this is just
+  // frame-to-frame interpolation of an already-clean, already-monotonic
+  // number, same technique POSITION_LERP already uses for fly position).
+  // The lerp factor is high enough that a real respawn (supply snapping
+  // 0 -> 1 in the underlying data) still reads as a genuine snap within a
+  // couple of frames, not a slow fade that would hide the reset.
+  let foodSupplyTarget = 1, waterSupplyTarget = 1;
+  let foodSupplyDisplay = 1, waterSupplyDisplay = 1;
+  // a per-SECOND rate (not a fixed per-frame fraction like the rest of this
+  // file's POSITION_LERP) -- multiplied by real dt each frame in animate()
+  // below, so the display genuinely converges to the target within a fixed
+  // real time regardless of the page's actual frame rate. This matters more
+  // here than it does for POSITION_LERP: the ~200k-triangle x3 fly mesh plus
+  // the synapse panel's own render can genuinely drop this page below 60fps,
+  // and a fixed per-frame multiplier tuned for 60fps would make the
+  // "clean snap back on respawn" look sluggish (converging over 1+ real
+  // second instead of ~1/10s) exactly when the page is busiest -- verified
+  // via a real Playwright trace of foodSupplyTarget vs. foodSupplyDisplay
+  // during this fix's own testing.
+  const SUPPLY_LERP_RATE = 14; // /s -- ~63% caught up every ~71ms, ~99% by ~330ms
   // a real (if rough) function of the fly's real current position vs each
   // landmark's own fixed position -- not a fabricated per-landmark signal.
   function proximityWeight(px, pz, lx, lz) {
@@ -1041,33 +1244,69 @@
   }
 
   let lastFrameTime = performance.now();
+  let __flybreak_frameCount = 0; // test-only counter, see FLYBREAK_DEBUG hook below
   function animate() {
     requestAnimationFrame(animate);
+    __flybreak_frameCount++;
 
     const now = performance.now();
     // clamp dt so a stalled tab / slow first frame doesn't send gravity
     // integration flying off in one huge jump.
-    const dt = Math.min(0.05, Math.max(0, (now - lastFrameTime) / 1000));
+    const rawDt = Math.max(0, (now - lastFrameTime) / 1000);
+    const dt = Math.min(0.05, rawDt);
     lastFrameTime = now;
 
     for (const instance of flies) updateFlyInstance(instance, dt);
 
-    // each landmark pulses by food_activity * ITS OWN local proximity
-    // weight -- honestly grounded in real position data, not a copy of the
-    // same raw number on both (see proximityWeight comment above).
+    // ease the displayed supply toward the latest real tick value -- see
+    // SUPPLY_LERP_RATE's comment above for why this is dt-scaled (frame-
+    // rate-independent) render smoothing, not signal smoothing. Uses the
+    // UNCLAMPED rawDt (not the gravity-safe `dt` above): unlike gravity's
+    // velocity integration, `display += (target-display)*min(1,RATE*dt)`
+    // can never overshoot or diverge no matter how large dt is (the factor
+    // itself is clamped to 1, i.e. "just snap to target"), so there's no
+    // instability to guard against here -- and clamping it to gravity's 0.05
+    // would badly UNDER-react on a slow/low-fps frame (measured in this
+    // sandbox's software-rendered testing: real frame times of ~0.5-0.7s,
+    // far above 0.05, which silently made the display lag the clean target
+    // by whole seconds -- the opposite of the "clean snap back" this is
+    // supposed to deliver).
+    const supplyLerpFactor = Math.min(1, SUPPLY_LERP_RATE * rawDt);
+    foodSupplyDisplay += (foodSupplyTarget - foodSupplyDisplay) * supplyLerpFactor;
+    waterSupplyDisplay += (waterSupplyTarget - waterSupplyDisplay) * supplyLerpFactor;
+
+    // PRIMARY driver: the clean supply level sets each landmark's baseline
+    // size/opacity, so "is this running out" reads correctly from across
+    // the scene, at any moment, whether or not the fly happens to be
+    // nearby right now -- a landmark down to 10% supply now visibly
+    // shrinks/dims even while the fly is off on the other side of the map,
+    // which the old activity*proximity-only formula could never show (far
+    // from the landmark, proximity ~0, so the old pulse -- and the old
+    // baseline, which was just a fixed opacity/scale -- stayed identical
+    // whether the real supply was full or empty).
+    // SECONDARY layer: the existing food_activity*proximity flicker, kept
+    // but at reduced amplitude relative to before -- real moment-to-moment
+    // neural response, riding on top of the clean baseline rather than
+    // being the only signal driving the landmark at all.
+    const FOOD_SCALE_MIN = 0.4, FOOD_OPACITY_MIN = 0.08, FOOD_OPACITY_MAX = 0.55;
+    const foodBaseScale = FOOD_SCALE_MIN + (1 - FOOD_SCALE_MIN) * foodSupplyDisplay;
+    const foodBaseOpacity = FOOD_OPACITY_MIN + (FOOD_OPACITY_MAX - FOOD_OPACITY_MIN) * foodSupplyDisplay;
     const foodPulseVal = foodActivity * foodProximity;
     const foodPeriod = 500 - foodPulseVal * 300;
-    const foodPulse = 1 + Math.sin(performance.now() / foodPeriod) * (0.1 + foodPulseVal * 0.35);
-    food.scale.setScalar(foodPulse);
+    const foodFlicker = Math.sin(performance.now() / foodPeriod) * (0.04 + foodPulseVal * 0.14);
+    food.scale.setScalar(Math.max(0.05, foodBaseScale * (1 + foodFlicker)));
     food.rotation.y += 0.002 + foodPulseVal * 0.01;
-    foodMat.opacity = 0.3 + foodPulseVal * 0.6;
+    foodMat.opacity = THREE.MathUtils.clamp(foodBaseOpacity + foodPulseVal * 0.22, 0, 1);
 
+    const WATER_SCALE_MIN = 0.4, WATER_OPACITY_MIN = 0.08, WATER_OPACITY_MAX = 0.55;
+    const waterBaseScale = WATER_SCALE_MIN + (1 - WATER_SCALE_MIN) * waterSupplyDisplay;
+    const waterBaseOpacity = WATER_OPACITY_MIN + (WATER_OPACITY_MAX - WATER_OPACITY_MIN) * waterSupplyDisplay;
     const waterPulseVal = foodActivity * waterProximity;
     const waterPeriod = 500 - waterPulseVal * 300;
-    const waterPulse = 1 + Math.sin(performance.now() / waterPeriod) * (0.1 + waterPulseVal * 0.35);
-    water.scale.setScalar(waterPulse);
+    const waterFlicker = Math.sin(performance.now() / waterPeriod) * (0.04 + waterPulseVal * 0.14);
+    water.scale.setScalar(Math.max(0.05, waterBaseScale * (1 + waterFlicker)));
     water.rotation.y += 0.002 + waterPulseVal * 0.01;
-    waterMat.opacity = 0.3 + waterPulseVal * 0.6;
+    waterMat.opacity = THREE.MathUtils.clamp(waterBaseOpacity + waterPulseVal * 0.22, 0, 1);
 
     // orbit close enough that the fly and its anatomy are actually legible
     // (was 28-38 units out -- a few pixels on screen at that range, no
@@ -1078,13 +1317,29 @@
     // itself -- otherwise this every-frame reset would clobber that on
     // the very next animation frame, before the screenshot is taken.
     if (!window.__flybreak_freeze_camera) {
-      camera.position.x = Math.sin(performance.now() / 20000) * 6;
-      camera.position.y = 6;
-      camera.position.z = 10 + Math.cos(performance.now() / 20000) * 3;
       // fly0 doesn't exist until the real mesh assets finish loading (see
       // loadFlybodyAssets below) -- until then just keep looking at the
       // origin, same as the camera's own initial lookAt() above.
-      camera.lookAt(fly0 ? fly0.group.position : ORIGIN);
+      const target = fly0 ? fly0.group.position : ORIGIN;
+      // the exact original orbit sweep (unchanged: same angle, same speed,
+      // same elliptical shape), computed as an absolute world position --
+      // then re-expressed as an offset FROM the look-at target and scaled
+      // by zoomMultiplier (see the wheel/pinch handlers above `renderer`).
+      // At zoomMultiplier === 1 this reproduces the original position
+      // exactly; zooming only rescales this offset's length, so the orbit's
+      // angle/speed are completely untouched by zoom, per spec.
+      const baseX = Math.sin(performance.now() / 20000) * 6;
+      const baseY = 6;
+      const baseZ = 10 + Math.cos(performance.now() / 20000) * 3;
+      const offX = baseX - target.x;
+      const offY = baseY - target.y;
+      const offZ = baseZ - target.z;
+      camera.position.set(
+        target.x + offX * zoomMultiplier,
+        target.y + offY * zoomMultiplier,
+        target.z + offZ * zoomMultiplier
+      );
+      camera.lookAt(target);
     }
 
     renderer.render(scene, camera);
@@ -1101,7 +1356,19 @@
   // before this script runs (e.g. window.FLYBREAK_DEBUG = true via
   // page.addInitScript in a Playwright test) -- never touches app behavior.
   if (window.FLYBREAK_DEBUG) {
-    window.__flybreak = { scene, camera, renderer, flies, THREE, updateFlyInstance };
+    window.__flybreak = {
+      scene, camera, renderer, flies, THREE, updateFlyInstance,
+      getZoomMultiplier: () => zoomMultiplier,
+      getCameraTarget: () => (fly0 ? fly0.group.position : ORIGIN),
+      getSupplyState: () => ({
+        foodSupplyTarget, waterSupplyTarget, foodSupplyDisplay, waterSupplyDisplay,
+        foodScale: food.scale.x, waterScale: water.scale.x,
+        foodOpacity: foodMat.opacity, waterOpacity: waterMat.opacity,
+      }),
+      synapseScene, synapseCamera, synapseRenderer, synapseGroup: () => synapseGroup,
+      getLatestTick: () => latest,
+      getFrameCount: () => __flybreak_frameCount,
+    };
   }
 
   // real-time HUD/synapse-map/WS wiring starts immediately -- none of it

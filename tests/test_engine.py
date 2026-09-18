@@ -677,6 +677,37 @@ def test_food_activity_differs_between_full_and_depleted_supply():
 
 
 @requires_connectome
+def test_activity_food_supply_water_supply_match_world_exactly():
+    """activity.food_supply/water_supply (schema "1.6") are the REAL
+    World.food_supply/water_supply passed into Simulation.step(), exact,
+    with zero smoothing/noise -- unlike food_activity (EMA-smoothed real
+    spike-fraction noise stacked on supply-gated proximity, see
+    Simulation.step()'s own comment). Runs a real World long enough to
+    genuinely deplete and respawn (same setup as
+    test_world_food_supply_floors_at_zero_and_respawns_after_cooldown) and
+    checks every single tick's fly-0 payload against world.food_supply/
+    water_supply at that same tick, not just the endpoints."""
+    world = World(n_flies=1)
+    fly = world.flies[0]
+    fly._x, fly._z = FOOD_POSITION
+    saw_depleted = False
+    saw_full = False
+    for _ in range(750):
+        payloads = world.step()
+        fly._x, fly._z = FOOD_POSITION
+        payload = payloads[0]
+        assert payload["activity"]["food_supply"] == world.food_supply
+        assert payload["activity"]["water_supply"] == world.water_supply
+        if world.food_supply <= 0.0:
+            saw_depleted = True
+        if world.food_supply >= 1.0:
+            saw_full = True
+    # a real depletion+respawn cycle actually happened during this run
+    assert saw_depleted
+    assert saw_full
+
+
+@requires_connectome
 def test_simulation_handle_control_overrides_mood_level():
     sim = Simulation(seed=3)
     sim.step()

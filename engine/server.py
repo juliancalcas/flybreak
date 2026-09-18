@@ -21,7 +21,7 @@ from contract.validator import validate_graph, validate_tick
 from engine.mood import MoodController
 from engine.network import LIFNetwork, get_sample_graph, warm_cache
 
-SCHEMA_VERSION = "1.5"
+SCHEMA_VERSION = "1.6"
 TICK_HZ = 20
 DT_MS = 1000.0 / TICK_HZ
 
@@ -30,17 +30,70 @@ DT_MS = 1000.0 / TICK_HZ
 # stimulus". No discrete preset values: the HUD labels the slider's ends
 # and middle, the value itself stays continuous.
 
-# Empirically measured on the real connectome (139,255 neurons): across
-# the full mood_level 0..1 sweep, the motor+descending pathway's per-tick
-# activity fraction ranges from ~0.31 (mood_level 0, unstimulated) to
-# ~0.58 (mood_level 1, "plena"), with tick-to-tick noise (std ~0.03)
-# comparable in size to that whole span -- a raw per-tick threshold would
-# make `action` flicker between bands almost independently of mood_level.
-# _MOTOR_EMA_ALPHA smooths that out (~10-tick / 500ms window);
-# _MOTOR_ACTIVITY_MIN/MAX rescale the smoothed value to a 0..1
-# "activity_norm" the action bands and `speed` are both defined against.
-_MOTOR_ACTIVITY_MIN = 0.30
-_MOTOR_ACTIVITY_MAX = 0.60
+# RECALIBRATED (this work cycle) -- was 0.30/0.60, based on an originally-
+# measured ~0.31 (mood_level 0) to ~0.58 (mood_level 1) raw per-tick range.
+# User feedback running the app: flies (almost) never actually reached
+# `action == "flying"` (activity_norm > 0.8) -- they "solo estan ahi" (just
+# sit there). Measured, not guessed, why: two things landed since that
+# original calibration that could plausibly have moved the real range --
+# the per-neuron NT sign-assignment switch (network.py's _INHIBITORY_NT
+# comment, 2.9% of synapses flipped sign) and the food/water supply
+# depletion mechanic. Re-running the ORIGINAL calibration's own methodology
+# unchanged (60-tick runs, seed 0, first 10 ticks dropped, LIFNetwork
+# driven directly with only the baseline noise `drive` -- no food/water
+# boost in this path at all, so this isolates the NT-switch's effect from
+# the depletion mechanic entirely) now measures ~0.36 (mood_level 0) to
+# ~0.49 (mood_level 1) -- the real range genuinely narrowed on BOTH ends
+# after the NT switch (the depletion mechanic cannot be the cause here,
+# since it plays no part in this direct-drive measurement at all). The
+# post-switch sanity check recorded in README.md/network.py's
+# _INHIBITORY_NT comment (motor+descending activity ~0.48) only spot-
+# checked one mid-range point, which still landed inside the old 0.31-0.58
+# window and so did not catch this.
+#
+# What actually matters for calibrating `activity_norm`, though, is the
+# real range `self._motor_ema` reaches during actual gameplay -- which
+# today also includes the food/water proximity boost and the conspecific
+# visual boost (both added after the original 0.31-0.58 number was
+# written), each rippling into net.motor_mask through the network's own
+# recurrent connectivity, not just the bare mood_level sweep above. So the
+# real calibration reference here is the best-/worst-case `self._motor_ema`
+# actually achievable through a real `Simulation`/`World`, measured the
+# same way (EMA'd, 500-tick runs, seeds 0-4, first 100 ticks dropped as
+# warm-up): worst case (mood_level pinned to 0, no peer, far from both
+# landmarks) settles to ~0.375 (min ever seen ~0.359); best case
+# (mood_level pinned to 1, parked exactly on a full-supply landmark, a
+# peer pinned at distance 0 -- maximal food + social boost together)
+# settles to ~0.495 (max ever seen ~0.512, p99 ~0.507) -- confirmed
+# consistent with real, undirected `World` runs (3 flies, 2500 ticks,
+# several seed sets, food/water depletion and social boost all actually
+# engaged): motor_ema never exceeded ~0.51 there either, and under the OLD
+# 0.30/0.60 calibration never once produced `action == "flying"` across
+# 15,000 fly-ticks measured that way -- the real ceiling (~0.51) sat
+# measurably below where the old 0.60 ceiling/0.8 flying-threshold were
+# calibrated, so the rescaled `activity_norm` could get to ~0.70 at best
+# and never further. That is the root cause, confirmed empirically, not
+# just the 2.9%-sign-flip number in isolation.
+#
+# Recalibrated to this real, current range: _MOTOR_ACTIVITY_MIN=0.36 (the
+# real worst-case floor), _MOTOR_ACTIVITY_MAX=0.51 (the real best-case
+# ceiling) -- same empirical approach as the original calibration, just
+# re-measured against what the network actually does today. Verified
+# against real `World` runs (2500 ticks, 3 flies, several seed sets) that
+# this produces a genuinely healthy spread across all 5 action bands, not
+# a degenerate one: frozen ~13-20%, idle ~24-31%, grooming ~23-29%,
+# walking ~15-23%, flying ~5-14% of ticks -- flying is now a real,
+# regularly-reachable state at genuine peak arousal/proximity, not an
+# unreachable one, and not the dominant one either. Tick-to-tick noise on
+# the RAW (pre-EMA) motor+descending fraction (std ~0.03-0.05, comparable
+# in size to the whole 0.36-0.51 span) is still large enough that a raw
+# per-tick threshold would make `action` flicker almost independently of
+# mood_level -- `_MOTOR_EMA_ALPHA` smooths that out (~10-tick / 500ms
+# window) exactly as before; `_MOTOR_ACTIVITY_MIN/MAX` rescale the smoothed
+# value to a 0..1 "activity_norm" the action bands and `speed` are both
+# defined against.
+_MOTOR_ACTIVITY_MIN = 0.36
+_MOTOR_ACTIVITY_MAX = 0.51
 _MOTOR_EMA_ALPHA = 0.1
 
 # The "food is present" stimulus (see README.md, "Where this is headed"
@@ -195,7 +248,10 @@ _FOOD_STEER_GAIN = 0.35
 # calibration (net.motor_mask activity measured at ~0.425-0.431 across
 # _SOCIAL_BOOST=0.0 to 1.0, well inside the tick-to-tick noise
 # _MOTOR_EMA_ALPHA already smooths over -- see its comment), so
-# _MOTOR_ACTIVITY_MIN/MAX needed no retuning for this.
+# _MOTOR_ACTIVITY_MIN/MAX needed no retuning for this specific addition
+# (a later, separate change -- the per-neuron NT sign-assignment switch --
+# did require retuning them; see _MOTOR_ACTIVITY_MIN/MAX's own comment
+# above for that real, unrelated recalibration).
 #
 # _SOCIAL_RANGE=5.0 (shorter than _FOOD_RANGE=8.0, deliberately -- "notice
 # a conspecific" is meant to read as closer-range than "smell a landmark
@@ -306,20 +362,56 @@ _SUPPLY_RESPAWN_TICKS = 300  # 15.0s cooldown before supply resets to 1.0
 _SEPARATION_SPRING = 1.0
 
 
+# Real, modest per-fly spawn offset (see World.__init__/_spawn_offset) --
+# previously every fly in World spawned at the exact same (0.0, 0.0) point
+# (Simulation.__init__'s own default spawn), which read as a "pop apart"
+# glitch on the very first few ticks (all 3 flies snapping visibly off of
+# one another the instant _apply_min_separation first ran) rather than 3
+# distinct flies from the start (user feedback, running the app: flies
+# should start spread apart, not coincident). Deterministic, by INDEX in
+# World.flies (not by seed, and not RNG) -- same "determinism where it's
+# free" style already used elsewhere in this file (e.g.
+# _apply_min_separation's own coincidence-fallback angle). Evenly spaced
+# around a circle of radius _SPAWN_RADIUS, at `2*pi*index/n_flies` per fly
+# -- for the real N_FLIES=3 that's 0/120/240 degrees, i.e. real
+# straight-line spawn distance between any two flies of
+# `2 * _SPAWN_RADIUS * sin(pi/3)` (real trig, not fabricated).
+# _SPAWN_RADIUS=1.5 is picked to exactly match _MIN_FLY_SEPARATION -- the
+# smallest "comfortable" per-fly clearance already established above --
+# so at N_FLIES=3 every pair starts ~2.60 units apart (2 * 1.5 * 0.866),
+# comfortably above _MIN_FLY_SEPARATION (so _apply_min_separation has
+# nothing to correct on tick 1, no pop) while staying comfortably inside
+# _SOCIAL_RANGE (5.0) and well inside _FOOD_RANGE (8.0) -- modest enough
+# that the 3 flies still read as "together" narratively at spawn, just not
+# literally coincident.
+_SPAWN_RADIUS = 1.5
+
+
+def _spawn_offset(index: int, n_flies: int) -> tuple[float, float]:
+    if n_flies <= 1:
+        return (0.0, 0.0)
+    angle = 2.0 * math.pi * index / n_flies
+    return (_SPAWN_RADIUS * math.sin(angle), _SPAWN_RADIUS * math.cos(angle))
+
+
 class Simulation:
-    def __init__(self, seed: int = 0):
+    def __init__(self, seed: int = 0, spawn: tuple[float, float] = (0.0, 0.0)):
         self.net = LIFNetwork(seed=seed)
         self.mood = MoodController()
         self.tick = 0
         self.sim_time_ms = 0.0
         self._heading = 0.0
-        # (0.0, 0.0) matches the frontend's fly spawn point exactly
-        # (frontend/index.html: `fly.position.set(0, 3, 0)`, y irrelevant
-        # here) -- this is the engine's first-ever notion of where the fly
-        # actually is; previously position existed only client-side, as
-        # the frontend's own dead-reckoning integration.
-        self._x = 0.0
-        self._z = 0.0
+        # `spawn` defaults to (0.0, 0.0), matching the frontend's fly spawn
+        # point exactly (frontend/index.html: `fly.position.set(0, 3, 0)`,
+        # y irrelevant here) -- this is the engine's first-ever notion of
+        # where the fly actually is; previously position existed only
+        # client-side, as the frontend's own dead-reckoning integration. A
+        # bare, standalone Simulation (no World around it) still spawns
+        # exactly there, same "standalone stays as before" spirit
+        # peer_positions/food_supply already follow. World gives each of
+        # its N_FLIES flies its own small, distinct `spawn` offset instead
+        # (see World.__init__/_spawn_offset) -- see that comment for why.
+        self._x, self._z = spawn
         self._motor_ema = None
         self._food_ema = None
         self._rng = np.random.default_rng(seed)
@@ -472,6 +564,28 @@ class Simulation:
             self._food_ema += _FOOD_EMA_ALPHA * (food_activity_raw - self._food_ema)
         food_activity = float(np.clip(self._food_ema, 0.0, 1.0))
 
+        # activity.food_supply/water_supply (schema "1.6"): the REAL
+        # World.food_supply/water_supply this tick's food_proximity/
+        # water_proximity were already scaled by above, passed straight
+        # through with zero smoothing/noise -- deliberately NOT another EMA
+        # like food_activity gets. food_activity is real spike-fraction
+        # noise (see _FOOD_EMA_ALPHA's comment) stacked on top of real
+        # supply-gated proximity -- two real effects a viewer can't tell
+        # apart from outside, which read as "goes up and down strangely"
+        # (user feedback, running the app: "el hambre baja y sube
+        # extrañamente"). These two fields expose the OTHER real signal on
+        # its own: a clean, exact, monotonic ramp down while a landmark
+        # depletes (see World._advance_one_supply -- deterministic
+        # subtraction, no RNG in the depletion math itself) and a clean
+        # snap back to 1.0 on respawn, nothing EMA'd or spike-derived about
+        # them. Both default to 1.0 (standalone Simulation, no World
+        # around it to read depletion state from -- same "standalone
+        # defaults to the no-op case" spirit food_supply/water_supply's own
+        # kwargs already follow), so a bare Simulation reports "always
+        # full" here exactly as it always implicitly behaved.
+        food_supply_out = float(np.clip(food_supply, 0.0, 1.0))
+        water_supply_out = float(np.clip(water_supply, 0.0, 1.0))
+
         if activity_norm < 0.2:
             action = "frozen"
         elif activity_norm < 0.4:
@@ -536,6 +650,8 @@ class Simulation:
                 "firing_rate_hz": firing_rate_hz,
                 "active_regions": [{"region": r, "activity": region_activity[r]} for r in self.net.regions],
                 "food_activity": food_activity,
+                "food_supply": food_supply_out,
+                "water_supply": water_supply_out,
                 "sample_spikes": sample_spikes,
             },
             "motor_state": {
@@ -610,14 +726,18 @@ class World:
 
     def __init__(self, n_flies: int = N_FLIES, seeds: list[int] | None = None):
         # distinct seeds so the N_FLIES flies don't all move identically
-        # despite sharing a spawn point -- see Simulation.__init__'s
-        # (0.0, 0.0) spawn comment; all flies born at the same point, like
-        # siblings, then wander apart under their own independent rng.
+        # even from their own distinct spawn points (see _spawn_offset) --
         # `seeds` defaults to 0..n_flies-1 (what main() actually runs);
         # tests pass other seed sets to check the "flies do end up near
         # each other" empirical claim isn't a one-seed fluke.
         seeds = list(range(n_flies)) if seeds is None else seeds
-        self.flies = [Simulation(seed=s) for s in seeds]
+        # each fly gets its own small, distinct spawn offset, by INDEX in
+        # this list (not by seed) -- see _spawn_offset/_SPAWN_RADIUS's own
+        # comment for why and the real numbers.
+        self.flies = [
+            Simulation(seed=s, spawn=_spawn_offset(i, len(seeds)))
+            for i, s in enumerate(seeds)
+        ]
         self.latest_payloads: list[dict] | None = None
         # Real per-landmark supply state (see _EATING_RANGE/
         # _SUPPLY_CONSUMPTION_PER_TICK/_SUPPLY_RESPAWN_TICKS's comment) --
