@@ -5,7 +5,15 @@ import pytest
 
 from contract.validator import validate_tick
 from engine.mood import MoodController
-from engine.network import LIFNetwork, data_available, get_sample_graph
+from engine.network import (
+    GROUP_ANTENNAL_LOBE,
+    GROUP_ELLIPSOID_BODY,
+    GROUP_LATERAL_HORN,
+    GROUP_MUSHROOM_BODY_PREFIX,
+    LIFNetwork,
+    data_available,
+    get_sample_graph,
+)
 from engine.server import (
     FOOD_POSITION,
     N_FLIES,
@@ -60,6 +68,116 @@ def test_network_food_mask_matches_real_gustatory_sub_class():
     # FOOD_SUB_CLASS comment for why this (not the olfactory classes) is
     # the real appetitive channel.
     assert net.food_mask.sum() == 129
+
+
+@requires_connectome
+def test_group_of_matches_real_known_root_ids():
+    """neurons.csv's `group` column loads correctly -- spot-checked
+    against real root_ids read directly from the real file (found by
+    scanning it during this work), not assumed. Each of these is a real
+    neuron with a real, known `group` value."""
+    net = LIFNetwork(seed=0)
+    root_ids, _, _, _ = __import__(
+        "engine.network", fromlist=["_read_classification"]
+    )._read_classification()
+    index_of_id = {int(v): i for i, v in enumerate(root_ids.tolist())}
+    known = {
+        720575940603356128: "AL",
+        720575940602553568: "MB_CA.MB_ML",
+        720575940602977248: "LH",
+        720575940602783968: "EB",
+    }
+    for root_id, expected_group in known.items():
+        idx = index_of_id[root_id]
+        assert net.group_of[idx] == expected_group
+
+
+@requires_connectome
+def test_new_group_derived_regions_have_plausible_real_sizes():
+    """mushroom_body/antennal_lobe/lateral_horn/ellipsoid_body -- the new
+    group-derived regions (see network.py's GROUP_MUSHROOM_BODY_PREFIX/
+    GROUP_ANTENNAL_LOBE/GROUP_LATERAL_HORN/GROUP_ELLIPSOID_BODY comment)
+    -- must appear in net.regions/net._region_masks with their real
+    measured sizes (found directly from the real neurons.csv.gz during
+    this work, not assumed): mushroom_body 5,038 neurons, antennal_lobe
+    2,762, lateral_horn 1,132, ellipsoid_body 355."""
+    net = LIFNetwork(seed=0)
+    assert {"mushroom_body", "antennal_lobe", "lateral_horn", "ellipsoid_body"} <= set(net.regions)
+    assert net._region_masks["mushroom_body"].sum() == 5038
+    assert net._region_masks["antennal_lobe"].sum() == 2762
+    assert net._region_masks["lateral_horn"].sum() == 1132
+    assert net._region_masks["ellipsoid_body"].sum() == 355
+    # every mushroom_body member's real `group` genuinely starts with
+    # "MB_" -- not just a size coincidence.
+    mb_groups = set(net.group_of[net._region_masks["mushroom_body"]].tolist())
+    assert mb_groups and all(g.startswith(GROUP_MUSHROOM_BODY_PREFIX) for g in mb_groups)
+    assert set(net.group_of[net._region_masks["antennal_lobe"]].tolist()) == {GROUP_ANTENNAL_LOBE}
+    assert set(net.group_of[net._region_masks["lateral_horn"]].tolist()) == {GROUP_LATERAL_HORN}
+    assert set(net.group_of[net._region_masks["ellipsoid_body"]].tolist()) == {GROUP_ELLIPSOID_BODY}
+
+
+@requires_connectome
+def test_new_regions_reported_in_active_regions_via_simulation():
+    """The whole point of Task 2: no schema change needed -- the new
+    group-derived regions show up in a real tick's
+    activity.active_regions automatically, through the exact same
+    regions/region_masks mechanism the super_class-derived ones already
+    use."""
+    sim = Simulation(seed=0)
+    payload = sim.step()
+    reported = {r["region"] for r in payload["activity"]["active_regions"]}
+    assert {"mushroom_body", "antennal_lobe", "lateral_horn", "ellipsoid_body"} <= reported
+
+
+@requires_connectome
+def test_per_synapse_vs_per_neuron_nt_agreement_rate():
+    """Documents, as a regression guard, the real measured agreement rate
+    between connections.csv's per-synapse-row `nt_type` and neurons.csv's
+    per-neuron `nt_type` that justified switching sign assignment to be
+    per-neuron-based (see network.py's _INHIBITORY_NT comment and
+    README.md's "The real connectome"). Reads both real CSVs directly
+    (not through _load_connectome's cache) so it fails loudly if a future
+    data refresh changes the real agreement rate materially, rather than
+    silently drifting.
+
+    Measured during this work: 3,869,878 total real synapse rows;
+    3,696,438 (95.5%) have both a non-empty per-synapse-row and
+    per-neuron classification; of those, 3,582,425 (96.9%) agree on
+    inhibitory (GABA/GLUT) vs. excitatory (everything else)."""
+    import csv
+    import gzip
+
+    from engine.network import _CONNECTIONS, _INHIBITORY_NT, _NEURONS
+
+    neuron_nt = {}
+    with gzip.open(_NEURONS, "rt", newline="") as f:
+        reader = csv.reader(f)
+        next(reader)
+        for row in reader:
+            neuron_nt[int(row[0])] = row[2]
+
+    inhib = set(_INHIBITORY_NT)
+    total = both_present = agree = 0
+    with gzip.open(_CONNECTIONS, "rt", newline="") as f:
+        reader = csv.reader(f)
+        next(reader)
+        for row in reader:
+            total += 1
+            syn_nt = row[4]
+            neuron_nt_val = neuron_nt.get(int(row[0]), "")
+            if syn_nt and neuron_nt_val:
+                both_present += 1
+                if (syn_nt in inhib) == (neuron_nt_val in inhib):
+                    agree += 1
+
+    assert total == 3_869_878
+    both_present_frac = both_present / total
+    agreement_frac = agree / both_present
+    # real measured 95.5% / 96.9% -- tight tolerance since this is exact,
+    # deterministic real-data arithmetic, not something with sampling
+    # noise; a wider drift would mean the underlying data changed.
+    assert both_present_frac == pytest.approx(0.955, abs=0.01)
+    assert agreement_frac == pytest.approx(0.969, abs=0.01)
 
 
 @requires_connectome

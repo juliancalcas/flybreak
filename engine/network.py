@@ -1,12 +1,14 @@
 """Loads the real FlyWire FAFB v783 connectome and runs it as a sparse
 leaky integrate-and-fire network.
 
-Data: engine/data/{connections,classification}.csv.gz -- fetch once per
-machine with `python -m engine.fetch_connectome` (see that module's
-docstring for source, license and citation). Not vendored in git, see
-.gitignore: at ~50 MB combined this is exactly the kind of external
-binary liveries/CLAUDE.md's own "What git versions and what it does not"
-keeps out of the repo, for the same reason.
+Data: engine/data/{connections,classification,neurons}.csv.gz -- fetch
+once per machine with `python -m engine.fetch_connectome` (see that
+module's docstring for source, license and citation). Not vendored in
+git, see .gitignore (a directory-level ignore on engine/data/, so it
+already covers all three files with no change needed): at ~52 MB combined
+this is exactly the kind of external binary liveries/CLAUDE.md's own
+"What git versions and what it does not" keeps out of the repo, for the
+same reason.
 
 139,255 neurons. connections.csv ships ~3.9M per-synapse-annotation rows;
 building the sparse matrix below collapses them onto ~2.7M unique (pre,
@@ -34,6 +36,7 @@ from scipy import sparse
 _DATA_DIR = Path(__file__).parent / "data"
 _CLASSIFICATION = _DATA_DIR / "classification.csv.gz"
 _CONNECTIONS = _DATA_DIR / "connections.csv.gz"
+_NEURONS = _DATA_DIR / "neurons.csv.gz"
 
 _TAU_MS = 20.0
 _V_RESET = 0.0
@@ -76,6 +79,55 @@ FOOD_SUB_CLASS = "sugar/water"
 # genuine distance sense in the real fly -- no such caveat applies here.
 VISUAL_SUPER_CLASSES = frozenset({"optic", "visual_projection"})
 
+# A small number of real, narratively meaningful FINE-GRAINED regions,
+# derived from neurons.csv's own `group` column -- a real per-neuron
+# neuropil label (629 distinct real values), much finer than the
+# super_class column region_of/regions/region_masks above are built from.
+# Folded into that SAME regions/region_masks mechanism below (see
+# _load_connectome), so they show up in server.py's `active_regions`
+# automatically -- no schema change, no frontend change (see README.md's
+# "The real connectome").
+#
+# GROUP_MUSHROOM_BODY_PREFIX: any `group` starting with "MB_" (the real
+# calyx/lobe/peduncle sub-compartments of the mushroom body -- MB_CA,
+# MB_ML, MB_PED, MB_VL, and their real multi-compartment combinations like
+# "MB_CA.MB_ML" -- all genuinely mushroom-body neurons regardless of which
+# sub-compartment(s) they touch). The mushroom body is the fly's real
+# associative learning/memory center -- genuinely interesting, and
+# previously invisible, folded entirely into the generic "central"
+# super_class category.
+#
+# GROUP_ANTENNAL_LOBE: `group == "AL"` exactly (not `AL.*` combination
+# groups like "AL.LH", which involve a second neuropil too) -- the real
+# primary olfactory processing center, a particularly good anatomical
+# match for this project's existing antennae glow on the fly's own body
+# (frontend/index.html's PART_COLORS.antennae), currently powered by the
+# much broader `sensory`+`sensory_ascending` super_class categories.
+#
+# GROUP_LATERAL_HORN / GROUP_ELLIPSOID_BODY: two further real, unambiguous,
+# well-known Drosophila neuropils, added because they are each genuinely
+# well understood, not to pad the list. The lateral horn (`group == "LH"`
+# exactly) is the real target of the antennal lobe's OTHER major olfactory
+# output pathway -- the "innate" odor-response route, contrasted with the
+# mushroom body's "learned" one -- so it pairs directly with
+# GROUP_ANTENNAL_LOBE/GROUP_MUSHROOM_BODY above in a real, well-documented
+# circuit story. The ellipsoid body (`group == "EB"` exactly) is a core
+# component of the real central complex, the fly's well-studied
+# heading-direction/spatial-orientation "compass" -- a genuinely distinct,
+# narratively clear population from the olfactory ones above.
+#
+# NOTE: these overlap with the super_class-derived regions above (e.g. a
+# mushroom-body neuron is also "central", an antennal-lobe neuron is also
+# "sensory") -- expected and fine. active_regions was never a strict
+# disjoint partition: each entry independently reports "fraction of THIS
+# named population currently spiking," not a piece of a sum-to-100%
+# breakdown, so a neuron counted in more than one named region is not
+# double-counted in any sum this codebase computes over active_regions.
+GROUP_MUSHROOM_BODY_PREFIX = "MB_"
+GROUP_ANTENNAL_LOBE = "AL"
+GROUP_LATERAL_HORN = "LH"
+GROUP_ELLIPSOID_BODY = "EB"
+
 # GABA is the fly CNS's primary fast inhibitory transmitter; glutamate
 # acts through inhibitory glutamate-gated chloride channels in insects
 # (unlike its excitatory role in vertebrates) -- both well-established,
@@ -87,13 +139,47 @@ VISUAL_SUPER_CLASSES = frozenset({"optic", "visual_projection"})
 # route them through.
 _INHIBITORY_NT = frozenset({"GABA", "GLUT"})
 
+# Synapse sign is assigned PER PRESYNAPTIC NEURON (Dale's principle: a
+# real neuron releases one dominant transmitter at essentially all of its
+# synapses), using neurons.csv's own per-neuron `nt_type` classification
+# -- not connections.csv's per-synapse-ROW `nt_type` copy, which is what
+# this codebase used before neurons.csv existed.
+#
+# Measured before switching (see tests/test_engine.py's
+# test_per_synapse_vs_per_neuron_nt_agreement_rate for the same numbers as
+# a regression guard): across connections.csv's real 3,869,878 synapse
+# rows, the presynaptic neuron's own neurons.csv `nt_type` is non-empty
+# for 3,696,438 of them (95.5%) -- the remaining 4.5% come from the real
+# ~14% of neurons neurons.csv leaves unclassified (`nt_type == ""`), which
+# happen to have below-average out-degree. Where both a per-synapse-row
+# classification and a per-neuron classification exist, they agree on
+# inhibitory-vs-excitatory (GABA/GLUT vs. everything else) 96.9% of the
+# time (3,582,425 / 3,696,438) -- a real, strong agreement, not a
+# coincidence of a small sample. Switching to per-neuron sign changes the
+# network's overall inhibitory-synapse fraction only marginally (39.26%
+# per-synapse-row -> 39.15% per-neuron: 2.9% of all rows flip sign,
+# essentially all of them cases where a handful of a neuron's synapse rows
+# were row-level-mislabeled against that neuron's own dominant, much
+# better-supported classification) -- see README.md's "The real
+# connectome" for the same numbers and the post-switch sanity check
+# (motor/food/visual per-tick activity still within this codebase's own
+# previously measured ranges).
+#
+# For the ~4.5% of synapse rows whose presynaptic neuron has no per-neuron
+# classification (`nt_type == ""`), sign falls back to that row's own
+# per-synapse-row `nt_type` -- the only real signal available for that
+# neuron, no worse than this codebase's previous behavior for exactly
+# those rows, and strictly better (Dale's-principle-consistent) for the
+# other 95.5%.
+_PER_NEURON_NT_FALLBACK = ""  # marks "no per-neuron classification" in neuron_nt_of
+
 # Caps synapse-count weight (median 6, mean 8.8, max 2405 in the real
 # data) so a handful of outlier connections cannot dominate a tick.
 _SYN_COUNT_CAP = 30.0
 
 
 def data_available() -> bool:
-    return _CLASSIFICATION.is_file() and _CONNECTIONS.is_file()
+    return _CLASSIFICATION.is_file() and _CONNECTIONS.is_file() and _NEURONS.is_file()
 
 
 def warm_cache() -> None:
@@ -118,8 +204,9 @@ def warm_cache() -> None:
 class _Connectome:
     n: int
     region_of: np.ndarray          # (n,) str, FlyWire's super_class per neuron
-    regions: list                  # sorted distinct values of region_of
-    region_masks: dict             # region -> (n,) bool mask, precomputed once
+    group_of: np.ndarray           # (n,) str, FlyWire's finer-grained `group` per neuron (neurons.csv)
+    regions: list                  # sorted distinct values of region_of, plus the group-derived extras
+    region_masks: dict             # region -> (n,) bool mask, precomputed once (super_class- and group-derived)
     motor_mask: np.ndarray         # (n,) bool, region_of in MOTOR_SUPER_CLASSES
     food_mask: np.ndarray          # (n,) bool, class==FOOD_CLASS & sub_class==FOOD_SUB_CLASS
     visual_mask: np.ndarray        # (n,) bool, region_of in VISUAL_SUPER_CLASSES
@@ -153,6 +240,29 @@ def _read_connections() -> tuple[list, list, list, list]:
     return pre, post, syn, nt
 
 
+def _read_neurons() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """neurons.csv.gz: neuron ID -> FlyWire's finer-grained `group`
+    neuropil label and its own per-neuron dominant-neurotransmitter
+    classification `nt_type` (empty for the real ~14% of neurons FlyWire
+    leaves unclassified at this granularity -- see
+    GROUP_MUSHROOM_BODY_PREFIX's module comment and _INHIBITORY_NT's
+    sign-assignment comment for what this codebase does with each
+    column). Only the 3 columns this codebase actually uses are read;
+    nt_type_score/da_avg/ser_avg/gaba_avg/glut_avg/ach_avg/oct_avg exist
+    in the real file but nothing here reads them.
+    """
+    ids, groups, nt_types = [], [], []
+    with gzip.open(_NEURONS, "rt", newline="") as f:
+        reader = csv.reader(f)
+        next(reader)  # header
+        for row in reader:
+            ids.append(int(row[0]))
+            groups.append(row[1])
+            nt_types.append(row[2])
+    return (np.array(ids, dtype=np.int64), np.array(groups, dtype=object),
+            np.array(nt_types, dtype=object))
+
+
 @lru_cache(maxsize=1)
 def _load_connectome() -> _Connectome:
     if not data_available():
@@ -162,13 +272,50 @@ def _load_connectome() -> _Connectome:
         )
     root_ids, region_of, class_of, sub_class_of = _read_classification()
     n = len(root_ids)
+    index_of_id = {int(v): i for i, v in enumerate(root_ids.tolist())}
+
     regions = sorted(set(region_of.tolist()))
     region_masks = {r: (region_of == r) for r in regions}
     motor_mask = np.isin(region_of, list(MOTOR_SUPER_CLASSES))
     food_mask = (class_of == FOOD_CLASS) & (sub_class_of == FOOD_SUB_CLASS)
     visual_mask = np.isin(region_of, list(VISUAL_SUPER_CLASSES))
 
-    index_of_id = {int(v): i for i, v in enumerate(root_ids.tolist())}
+    # neurons.csv join: its root_id column is 100% overlapping with
+    # classification.csv's (same underlying FlyWire dataset, verified
+    # directly, not a separate dataset needing reconciliation), so every
+    # row maps onto an existing index via the same index_of_id built
+    # above. group_of/neuron_nt_of default to "" (neurons.csv's own
+    # empty-string convention for "no classification") for any id that
+    # somehow didn't match, so a partial/corrupted file degrades to "no
+    # group/no per-neuron nt for that neuron" rather than crashing.
+    neuron_ids, group_raw, neuron_nt_raw = _read_neurons()
+    neuron_idx = np.fromiter((index_of_id.get(int(x), -1) for x in neuron_ids.tolist()),
+                              dtype=np.int64, count=len(neuron_ids))
+    valid_neuron = neuron_idx >= 0
+    group_of = np.full(n, "", dtype=object)
+    neuron_nt_of = np.full(n, "", dtype=object)
+    group_of[neuron_idx[valid_neuron]] = group_raw[valid_neuron]
+    neuron_nt_of[neuron_idx[valid_neuron]] = neuron_nt_raw[valid_neuron]
+
+    # The group-derived extra named regions -- see GROUP_MUSHROOM_BODY_
+    # PREFIX/GROUP_ANTENNAL_LOBE/GROUP_LATERAL_HORN/GROUP_ELLIPSOID_BODY's
+    # module comment for what each one is and why, and the double-counting
+    # note there for why merging them into the SAME region_masks/regions
+    # as the super_class-derived ones above is fine.
+    mushroom_body_mask = np.array(
+        [g.startswith(GROUP_MUSHROOM_BODY_PREFIX) for g in group_of.tolist()], dtype=bool)
+    antennal_lobe_mask = (group_of == GROUP_ANTENNAL_LOBE)
+    lateral_horn_mask = (group_of == GROUP_LATERAL_HORN)
+    ellipsoid_body_mask = (group_of == GROUP_ELLIPSOID_BODY)
+    extra_region_masks = {
+        "mushroom_body": mushroom_body_mask,
+        "antennal_lobe": antennal_lobe_mask,
+        "lateral_horn": lateral_horn_mask,
+        "ellipsoid_body": ellipsoid_body_mask,
+    }
+    region_masks.update(extra_region_masks)
+    regions = regions + sorted(extra_region_masks)
+
     pre_ids, post_ids, syn_strs, nt_types = _read_connections()
 
     pre = np.fromiter((index_of_id.get(int(x), -1) for x in pre_ids),
@@ -181,7 +328,16 @@ def _load_connectome() -> _Connectome:
 
     syn_count = np.array(syn_strs, dtype=np.float32)[valid]
     nt_type = np.array(nt_types, dtype=object)[valid]
-    sign = np.where(np.isin(nt_type, list(_INHIBITORY_NT)), -1.0, 1.0).astype(np.float32)
+
+    # Per-neuron sign assignment (Dale's principle), falling back to the
+    # synapse row's own per-synapse nt_type where the presynaptic neuron
+    # has no per-neuron classification -- see _INHIBITORY_NT's comment
+    # above for the real measured agreement rate and the reasoning for
+    # this switch.
+    pre_neuron_nt = neuron_nt_of[pre]
+    no_per_neuron_nt = pre_neuron_nt == _PER_NEURON_NT_FALLBACK
+    effective_nt = np.where(no_per_neuron_nt, nt_type, pre_neuron_nt)
+    sign = np.where(np.isin(effective_nt, list(_INHIBITORY_NT)), -1.0, 1.0).astype(np.float32)
     weight = np.clip(syn_count, 1.0, _SYN_COUNT_CAP) / _SYN_COUNT_CAP * sign
 
     # row = postsynaptic neuron (who receives this tick's input), col =
@@ -189,7 +345,7 @@ def _load_connectome() -> _Connectome:
     # neuron's real synaptic input.
     w = sparse.csr_matrix((weight, (post, pre)), shape=(n, n))
 
-    return _Connectome(n=n, region_of=region_of, regions=regions,
+    return _Connectome(n=n, region_of=region_of, group_of=group_of, regions=regions,
                         region_masks=region_masks, motor_mask=motor_mask,
                         food_mask=food_mask, visual_mask=visual_mask, w=w)
 
@@ -209,6 +365,7 @@ class LIFNetwork:
         connectome = _load_connectome()
         self.n = connectome.n
         self.region_of = connectome.region_of
+        self.group_of = connectome.group_of
         self.regions = connectome.regions
         self._region_masks = connectome.region_masks
         self.motor_mask = connectome.motor_mask

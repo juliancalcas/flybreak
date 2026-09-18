@@ -19,7 +19,7 @@ genuinely not built yet.
 
 ```bash
 pip install -r requirements.txt
-python __main__.py                # fetches the connectome on first run (~50 MB),
+python __main__.py                # fetches the connectome on first run (~52 MB),
                                    # starts engine + frontend, opens your browser
 ```
 
@@ -71,10 +71,13 @@ without the real engine, and the engine's contract is enforced by
   population. Region-tagged by FlyWire's own `super_class` annotation
   (`optic`, `central`, `sensory`, `visual_projection`, `ascending`,
   `descending`, `sensory_ascending`, `visual_centrifugal`, `motor`,
-  `endocrine` -- discovered at runtime from the data, not a fixed list).
+  `endocrine` -- discovered at runtime from the data, not a fixed list),
+  plus four further real, finer-grained named regions derived from
+  FlyWire's `group` annotation (`mushroom_body`, `antennal_lobe`,
+  `lateral_horn`, `ellipsoid_body` -- see "The real connectome" below).
   Requires `python -m engine.fetch_connectome` to have been run
   once on this machine first (see "The real connectome" below) -- the
-  ~50 MB data is never in git.
+  ~52 MB data is never in git.
 - `mood.py` -- `MoodController`: the hybrid `mood_level` (see "The
   mood_level stimulus" below).
 - `server.py` -- `Simulation` ticks one fly's network at 20 Hz, applies
@@ -100,7 +103,7 @@ when iterating on the engine alone, e.g. against a different frontend or
 a raw WebSocket client):
 
 ```bash
-python -m engine.fetch_connectome  # once per machine, ~50 MB, ~10-15s to load after
+python -m engine.fetch_connectome  # once per machine, ~52 MB, ~10-15s to load after
 python -m engine.server            # ws://127.0.0.1:8765, one shared World (3 flies), any number of viewers
 ```
 
@@ -172,22 +175,85 @@ unique synaptic connections after collapsing `connections.csv`'s ~3.9M
 per-synapse-annotation rows onto (pre, post) pairs), sourced from
 `solomonsealed/flybrain` (MIT license) -- one of the two reference repos
 the original project brief named, whose `data/` folder packages the raw
-FlyWire Codex export as plain CSVs. `fetch_connectome.py` downloads just
-the two files needed (`connections.csv.gz`, `classification.csv.gz`, ~50
-MB combined) from that repo directly; never vendored in git, see
-`.gitignore`.
+FlyWire Codex export as plain CSVs. `fetch_connectome.py` downloads the
+three files needed (`connections.csv.gz`, `classification.csv.gz`,
+`neurons.csv.gz`, ~52 MB combined) from that repo directly; never
+vendored in git, see `.gitignore`.
 
-Synapse sign: GABA and glutamate are treated as inhibitory (GABA is the
-fly CNS's primary fast inhibitory transmitter; glutamate acts through
-inhibitory glutamate-gated chloride channels in insects, unlike its
-excitatory role in vertebrates -- both well-established, not invented for
-this project). Acetylcholine plus the three neuromodulators present in the
-data (dopamine, serotonin, octopamine) are treated as excitatory, a real
-simplification for those three: at LIF timescales they modulate rather
-than directly drive spiking, and this model has no separate neuromodulatory
-pathway to route them through. Synapse-count weight is capped (median 6,
-mean 8.8, max 2405 in the real data) so a handful of outlier connections
-cannot dominate a tick.
+`neurons.csv` (verified directly: 139,255 rows, `root_id` 100%
+overlapping the other two files' neuron IDs -- the same dataset, not a
+second one needing reconciliation) adds two real things this project
+uses: a much finer-grained `group` neuropil label (629 distinct real
+values, vs. `classification.csv`'s ~10 broad `super_class` categories),
+and a real PER-NEURON dominant-neurotransmitter classification `nt_type`
+(ACH/GABA/GLUT/SER/DA/OCT, empty for the real ~14% of neurons FlyWire
+leaves unclassified at this granularity) -- distinct from
+`connections.csv`'s PER-SYNAPSE-ROW `nt_type` column. (It also carries
+`nt_type_score` and per-NT confidence averages `da_avg`/`ser_avg`/
+`gaba_avg`/`glut_avg`/`ach_avg`/`oct_avg`; nothing in this codebase reads
+those yet.)
+
+**Four new, real, narratively meaningful named regions**, built from
+`group` and folded into the same `regions`/`region_masks` mechanism
+`active_regions` already reports every tick (no schema change, no
+frontend change -- `frontend/index.html`'s region-list rendering loop
+iterates `activity.active_regions` generically and has no region-name-
+specific code; only its separate, already-existing `driveFlyRegions`
+body-part-coloring function looks up specific super_class names by
+name, and it safely defaults to 0 for any name it doesn't recognize, so
+these additions don't affect it either way): `mushroom_body` (any
+`group` starting with `"MB_"` -- the real associative learning/memory
+center, **5,038 neurons**, previously invisible, folded entirely into the
+generic `central` super_class), `antennal_lobe` (`group == "AL"` exactly,
+**2,762 neurons** -- the real primary olfactory processing center, a
+particularly good anatomical match for the existing antennae glow on the
+fly's own body), `lateral_horn` (`group == "LH"` exactly, **1,132
+neurons** -- the antennal lobe's other major olfactory output pathway,
+the real "innate" odor-response route, contrasted with the mushroom
+body's "learned" one), and `ellipsoid_body` (`group == "EB"` exactly,
+**355 neurons** -- a core component of the real central complex, the
+fly's well-studied heading-direction "compass"). These overlap with the
+existing super_class-derived regions (a mushroom-body neuron is also
+`central`) -- expected and fine: `active_regions` was never a disjoint
+partition, each entry independently reports "fraction of THIS named
+population currently spiking."
+
+Synapse sign is assigned PER PRESYNAPTIC NEURON, using `neurons.csv`'s
+own `nt_type` (Dale's principle: a real neuron releases one dominant
+transmitter at essentially all its synapses, making a per-neuron
+classification a legitimate, arguably more biologically principled
+alternative to `connections.csv`'s per-synapse-row copy this codebase
+used before `neurons.csv` existed) -- GABA and glutamate are inhibitory
+(GABA is the fly CNS's primary fast inhibitory transmitter; glutamate
+acts through inhibitory glutamate-gated chloride channels in insects,
+unlike its excitatory role in vertebrates -- both well-established, not
+invented for this project); acetylcholine plus the three neuromodulators
+present in the data (dopamine, serotonin, octopamine) are excitatory, a
+real simplification for those three: at LIF timescales they modulate
+rather than directly drive spiking, and this model has no separate
+neuromodulatory pathway to route them through. Where the presynaptic
+neuron has no per-neuron classification (the real ~14% of neurons, ~4.5%
+of synapse rows once weighted by out-degree), sign falls back to that
+row's own `connections.csv` `nt_type`.
+
+This switch was measured, not assumed: across `connections.csv`'s real
+3,869,878 synapse rows, a presynaptic-neuron `nt_type` from `neurons.csv`
+exists for 3,696,438 of them (95.5%); where both a per-synapse-row and a
+per-neuron classification exist, they agree on inhibitory-vs-excitatory
+96.9% of the time (3,582,425 / 3,696,438) -- a real, strong agreement.
+Switching changes the network's overall inhibitory-synapse fraction only
+marginally (39.26% per-synapse-row -> 39.15% per-neuron; 2.9% of all rows
+flip sign). Post-switch sanity check on the full network (60-tick runs,
+seed 0, same methodology as the boost measurements below): motor+
+descending activity ~0.48 (within the previously measured 0.31-0.58
+mood-sweep range), food_mask baseline ~0.21 rising to ~0.58 boosted
+(consistent with the previously measured ~0.22-0.29 baseline / ~0.62-0.65
+boosted range), visual_mask baseline ~0.273 rising to ~0.337 with a peer
+nearby (matching the previously measured ~0.272-0.274 baseline / ~0.344
+boosted numbers almost exactly) -- nothing broke.
+
+Synapse-count weight is capped (median 6, mean 8.8, max 2405 in the real
+data) so a handful of outlier connections cannot dominate a tick.
 
 Load takes ~10-15s (pure `csv`+`gzip`+`numpy`, no pandas dependency) and
 happens once per process, cached (`network.warm_cache()`, called by
