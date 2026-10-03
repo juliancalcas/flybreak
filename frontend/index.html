@@ -7,10 +7,37 @@
 <style>
   :root { color-scheme: dark; }
   html, body { margin: 0; height: 100%; background: #05070a; overflow: hidden; font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
-  #scene { position: fixed; inset: 0; }
+  /* Explicit z-index on both #scene and #hud (previously left at the
+     default `auto` either side) -- harmless hygiene, makes the stacking
+     order unambiguous instead of relying on DOM order among two
+     otherwise-untagged position:fixed siblings. Not itself the fix for
+     the narrator-panel-invisible bug below (see #narrator-text's own
+     comment for the real cause and how it was actually diagnosed). */
+  #scene { position: fixed; inset: 0; z-index: 0; }
 
   #hud {
     position: fixed; inset: 0; pointer-events: none;
+    z-index: 1;
+    /* will-change forces the browser to promote #hud to its own
+       compositor layer up front, instead of deciding whether to do so
+       opportunistically. Measured need, not a guess: repeated full-page
+       screenshots against the live engine showed #hud's children
+       (narrator panel included) intermittently missing from the
+       composited frame -- roughly half the time across repeated
+       captures -- while getComputedStyle on the very same element
+       always reported correct opacity/layout throughout, meaning the
+       DOM/CSS state was right and only the actual paint was being
+       dropped. That is a compositor-scheduling symptom, not a styling
+       bug, and it showed up specifically while #scene's WebGL canvas
+       was under heavy load (the browser was separately logging "GPU
+       stall due to ReadPixels" at the same time) -- consistent with the
+       browser occasionally skipping the overlay layer's composite pass
+       on a frame where the canvas layer was expensive to produce.
+       Forcing layer promotion is the standard fix for exactly this
+       symptom (an overlay over a busy canvas intermittently not
+       compositing); it stops the browser from having to make that
+       per-frame judgment call at all. */
+    will-change: transform;
     display: flex; flex-direction: column; justify-content: space-between;
     padding: 16px; box-sizing: border-box; color: #b7f7c8;
     text-shadow: 0 0 6px rgba(90, 255, 140, 0.35);
@@ -70,6 +97,65 @@
   #synapse-canvas { display: block; width: 100%; height: auto; aspect-ratio: 720 / 520; }
   #synapse-legend { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 6px; font-size: 10px; opacity: 0.85; }
   #synapse-legend span.dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 4px; vertical-align: middle; }
+
+  /* ---- narrator caption: the "voice" of the interface -- see the big
+     comment block above narrateSituation() in the script for what this
+     is and isn't. Deliberately NOT another .panel: everything else in
+     this HUD is cool-green telemetry text; this is warm amber, serif,
+     italic, and reads like a caption card, not a debug readout, so it's
+     legible at a glance as a different KIND of information (an
+     observation, not a raw number) even before anyone reads a word of it. */
+  #narrator-panel {
+    /* position: absolute, not fixed -- #hud (its parent) is already
+       position:fixed; inset:0, so absolute here is pixel-identical to
+       fixed relative to the viewport. Harmless simplification (one fewer
+       independent fixed-position box), kept from debugging the real bug
+       below, though it turned out not to be the actual cause -- see
+       #narrator-text's own comment for what was. */
+    position: absolute;
+    top: 16px; left: 50%; transform: translateX(-50%);
+    width: min(620px, 78vw);
+    text-align: center;
+    pointer-events: none;
+    z-index: 4;
+  }
+  #narrator-text {
+    /* No backdrop-filter here on purpose: it was tested and found to
+       silently fail to composite in at least one real rendering
+       environment (headless/software-rendered Chromium over the WebGL
+       canvas) -- the element reported correct layout/opacity/z-index via
+       getComputedStyle and rendered fine in an isolated element
+       screenshot, yet was invisible in the actual full-page render. The
+       sibling `.panel` elements use backdrop-filter without this problem,
+       but they're plain block divs, not `display: inline-block` like
+       this one -- rather than depend on that distinction holding across
+       every browser/GPU combination a real user might have, this uses a
+       plain solid-ish background instead, which cannot have this failure
+       mode. */
+    display: inline-block;
+    background: linear-gradient(180deg, rgba(35, 22, 8, 0.92), rgba(18, 11, 4, 0.9));
+    border: 1px solid rgba(255, 200, 120, 0.3);
+    border-radius: 10px;
+    padding: 10px 22px;
+    font-family: Georgia, "Iowan Old Style", "Palatino Linotype", serif;
+    font-style: italic;
+    font-size: 14px;
+    line-height: 1.55;
+    color: #ffe3b0;
+    text-shadow: 0 0 10px rgba(255, 190, 110, 0.3);
+    opacity: 1;
+    transition: opacity 0.5s ease;
+  }
+  #narrator-text.narrator-fade { opacity: 0; }
+  /* narrow/phone screens: the two corner telemetry panels above/below
+     leave little clear width at the top, so shrink the caption rather
+     than let it visually collide with them -- it still sits on top
+     (z-index 4, same as wide screens) and stays fully legible either way,
+     this just keeps it from looking like an accidental overlap. */
+  @media (max-width: 640px) {
+    #narrator-panel { width: 92vw; top: 10px; }
+    #narrator-text { font-size: 12px; padding: 7px 14px; }
+  }
 </style>
 </head>
 <body>
@@ -78,6 +164,10 @@
 <div id="credits">fly anatomy: flybody (Google DeepMind + HHMI Janelia), Apache-2.0 -- Vaxenburg et al., <i>Nature</i> 643, 1312-1320 (2025)</div>
 
 <div id="hud">
+  <!-- narrator caption: see the comment block above narrateSituation() in
+       the script for what this reads, how often it updates, and why. -->
+  <div id="narrator-panel"><div id="narrator-text">watching quietly, waiting for the first tick...</div></div>
+
   <div class="top-row">
     <div class="panel">
       <div><span id="status-dot" class="status-disconnected"></span><span id="status-text">connecting...</span></div>
@@ -257,6 +347,13 @@
     // activity/stimulus always have been -- see world.other_flies loop
     // above, which never gets this).
     applySynapseSpikes(tick.activity.sample_spikes);
+
+    // narrator caption -- see its own big comment block (above
+    // narrateComputeSituation, defined further up this file) for cadence/
+    // grounding. Runs off the raw tick directly, so it works even before
+    // the flybody mesh has finished loading (unlike the fly-mesh block
+    // above, which is guarded on `flies.length`).
+    updateNarrator(tick);
   }
 
   // ---- mood_level control: hybrid (auto ramp in the engine, manual override
@@ -285,6 +382,255 @@
   function setMode(next) {
     mode = next;
     modeBtn.textContent = "mode: " + mode + (mode === "manual" ? " (tap to release)" : "");
+  }
+
+  // ---- narrator caption: a short, warm, observational sentence (or two)
+  // translating the REAL, currently-arriving tick into readable language --
+  // "what a calm nature-documentary narrator would say," not a second copy
+  // of the numeric HUD above. Every noun/verb here traces to a real field
+  // already on the wire: tick.motor_state.action/position,
+  // tick.stimulus.mood_level, tick.activity.food_supply/water_supply
+  // (the clean, unsmoothed "1.6" fields -- NOT food_activity, which is
+  // EMA-smoothed spike noise stacked on top of the same supply-gated
+  // proximity and reads as "goes up and down strangely," see the
+  // food_activity comment in renderHud), and tick.world.other_flies. The
+  // distance bands below (NARR_EATING_RANGE/NARR_FOOD_RANGE/
+  // NARR_SOCIAL_RANGE) are the same real numbers engine/server.py's own
+  // _EATING_RANGE/_FOOD_RANGE/_SOCIAL_RANGE use for "close enough to
+  // actually be eating," "close enough to sense/head toward," and "close
+  // enough to notice a peer" -- so "heading toward water" or "nearby"
+  // means exactly what it means to the engine, not an arbitrary frontend
+  // guess. Same "no fear stimulus, ever" standard as the rest of this
+  // project (README's "No fear stimulus, ever" section) applies to the
+  // WORDS here too -- nothing is ever phrased as threatening, urgent, or
+  // scary, including a depleted landmark ("has run out for now," not
+  // "is gone" or anything alarmed) or another fly's presence (always
+  // neutral-to-warm, never a startle).
+  //
+  // Update cadence: driven by real state transitions (action changed,
+  // arrived at / departed a landmark, a landmark's supply band changed --
+  // including a genuine deplete or respawn, a peer came close, mood_level
+  // crossed into a new "feliz"/"muy feliz"/"plena" band -- same three
+  // bands the mood slider itself already uses, see its mood-scale labels),
+  // rate-limited to at most once every NARRATOR_MIN_INTERVAL_MS so several
+  // real changes in the same tick don't flicker the caption illegibly. A
+  // real change that arrives mid-cooldown is never silently dropped -- it
+  // is queued (narratorPending) and shown the moment the cooldown clears.
+  // When nothing notable has changed for NARRATOR_PERIODIC_MS, the caption
+  // still refreshes with a different truthful phrasing of the CURRENT
+  // steady state (so the caption never looks frozen/dead on a long calm
+  // stretch) -- this is not a random flavor-text timer, it re-describes
+  // whatever is actually still true, just in different words each time,
+  // via the same template pools the event-driven path uses.
+  const NARR_EATING_RANGE = 2.0; // matches engine/server.py's _EATING_RANGE
+  const NARR_FOOD_RANGE = 8.0;   // matches engine/server.py's _FOOD_RANGE
+  const NARR_SOCIAL_RANGE = 5.0; // matches engine/server.py's _SOCIAL_RANGE
+  const NARRATOR_MIN_INTERVAL_MS = 3200;
+  const NARRATOR_PERIODIC_MS = 9000;
+
+  function narrSupplyBand(v) {
+    if (v >= 0.75) return "fresh";
+    if (v >= 0.35) return "good";
+    if (v > 0.02) return "low";
+    return "depleted";
+  }
+  // same three bands/labels the mood slider itself already presents
+  // ("feliz" / "muy feliz" / "plena", see the #mood-panel markup) -- not
+  // new mood language invented for the narrator.
+  function narrMoodBand(v) {
+    if (v < 1 / 3) return "feliz";
+    if (v < 2 / 3) return "muy_feliz";
+    return "plena";
+  }
+
+  // one real snapshot of "what's true right now," built fresh from this
+  // tick's real fields -- nothing here is remembered/inferred beyond a
+  // straight distance/band computation off the current tick.
+  function narrateComputeSituation(tick) {
+    const pos = tick.motor_state.position;
+    const distFood = Math.hypot(pos.x - FOOD_POSITION.x, pos.z - FOOD_POSITION.z);
+    const distWater = Math.hypot(pos.x - WATER_POSITION.x, pos.z - WATER_POSITION.z);
+    const foodSupply = typeof tick.activity.food_supply === "number" ? tick.activity.food_supply : 1;
+    const waterSupply = typeof tick.activity.water_supply === "number" ? tick.activity.water_supply : 1;
+    let nearestPeerDist = Infinity;
+    const others = (tick.world && tick.world.other_flies) || [];
+    for (const o of others) {
+      const d = Math.hypot(pos.x - o.position.x, pos.z - o.position.z);
+      if (d < nearestPeerDist) nearestPeerDist = d;
+    }
+    return {
+      action: tick.motor_state.action,
+      atFood: distFood <= NARR_EATING_RANGE,
+      atWater: distWater <= NARR_EATING_RANGE,
+      // "heading toward" X only when actually closer to X than to the
+      // other landmark -- the same rule engine/server.py's own chemotaxis
+      // retarget uses (`target = FOOD_POSITION if food_proximity >=
+      // water_proximity else WATER_POSITION`), so this claim matches what
+      // the fly's real steering is actually doing this tick.
+      towardFood: distFood <= NARR_FOOD_RANGE && distFood > NARR_EATING_RANGE && distFood <= distWater,
+      towardWater: distWater <= NARR_FOOD_RANGE && distWater > NARR_EATING_RANGE && distWater < distFood,
+      foodBand: narrSupplyBand(foodSupply),
+      waterBand: narrSupplyBand(waterSupply),
+      peerNear: nearestPeerDist <= NARR_SOCIAL_RANGE,
+      moodBand: narrMoodBand(tick.stimulus.mood_level),
+    };
+  }
+
+  // deterministic rotation (not Math.random) through each situation's
+  // sentence variants, keyed per-situation so different situations don't
+  // starve each other's variety -- gives real "range" across repeated
+  // showings of the same true state without picking randomly.
+  const _narrPickCounters = new Map();
+  function narrPick(arr, key, situation) {
+    const idx = (_narrPickCounters.get(key) || 0) % arr.length;
+    _narrPickCounters.set(key, idx + 1);
+    return arr[idx](situation);
+  }
+
+  const NARR_ACTION_TEMPLATES = {
+    idle: [() => "It has come to rest.", () => "It's settled and quiet for now.", () => "It's paused, taking things slow."],
+    walking: [() => "It's walking calmly across the ground.", () => "It ambles along, unhurried.", () => "It's making its way on foot."],
+    grooming: [() => "It has paused to groom itself.", () => "It's cleaning its wings and legs.", () => "It's tending to itself for a moment."],
+    flying: [() => "It has lifted off and is flying.", () => "It's up on the wing, circling.", () => "It's airborne, gliding along."],
+    // "frozen" is a real motor_state.action value, but "frozen" reads as
+    // alarmed in English -- worded here the same calm way the rest of this
+    // project treats every state, per the "no fear stimulus, ever" standard.
+    frozen: [() => "It's holding very still for a moment.", () => "It has gone quite still, just resting.", () => "It's paused completely, motionless for now."],
+  };
+  const NARR_AT_FOOD_TEMPLATES = [
+    (s) => s.foodBand === "depleted" ? "It's still by the food, though little is left there right now." : "It's settled at the food, feeding.",
+    (s) => "It lingers at the food" + (s.foodBand === "fresh" ? ", which is fresh and plentiful." : s.foodBand === "low" ? ", which is running low." : "."),
+  ];
+  const NARR_AT_WATER_TEMPLATES = [
+    (s) => s.waterBand === "depleted" ? "It's still by the water, though the supply is thin right now." : "It's paused at the water, drinking.",
+    (s) => "It lingers at the water" + (s.waterBand === "fresh" ? ", which is fresh and plentiful." : s.waterBand === "low" ? ", which is running low." : "."),
+  ];
+  const NARR_TOWARD_FOOD_TEMPLATES = [() => "It has caught the scent of food and turned that way.", () => "It's making its way toward the food."];
+  const NARR_TOWARD_WATER_TEMPLATES = [() => "It has turned toward the water.", () => "It's heading for the water now."];
+  const NARR_PEER_NEAR_TEMPLATES = [() => "Another fly is close by right now.", () => "It has company nearby at the moment."];
+  const NARR_MOOD_TEMPLATES = {
+    feliz: [() => "It seems content.", () => "It seems at ease, moving easily."],
+    muy_feliz: [() => "It seems very content right now.", () => "It's settled into an easy calm."],
+    plena: [() => "It seems utterly at peace.", () => "It has reached a deep, easy calm."],
+  };
+
+  // event templates: fired only on a genuine transition (see
+  // narrateDetectEvents below), so these read as "something just happened,"
+  // not a restatement of an unchanged state.
+  const NARR_EVENT_TEMPLATES = {
+    peerArrived: [() => "Another fly has drifted close -- for a moment, it isn't alone.", () => "A companion has come near."],
+    peerLeft: [() => "Its companion has wandered off again; it carries on unhurried.", () => "Alone again, it continues at its own pace."],
+    foodReplenished: [() => "Fresh food has appeared where the old supply ran out.", () => "The food source has filled back up."],
+    waterReplenished: [() => "The water has come back after running dry.", () => "Water is flowing again at the old spot."],
+    foodDepleted: [() => "The food has run out for now; it will return before long.", () => "There's nothing left at the food source at the moment."],
+    waterDepleted: [() => "The water has run dry for the moment.", () => "There's no water there just now."],
+    arrivedFood: [(s) => s.foodBand === "depleted" ? "It has reached the food, though there's little left." : "It has reached the food and begun to feed.", () => "It has settled right at the food."],
+    arrivedWater: [(s) => s.waterBand === "depleted" ? "It has reached the water, though the supply is thin." : "It has reached the water to drink.", () => "It has paused right at the water."],
+    actionChanged: [(s) => narrPick(NARR_ACTION_TEMPLATES[s.action] || NARR_ACTION_TEMPLATES.idle, "action_" + s.action, s)],
+    towardFood: NARR_TOWARD_FOOD_TEMPLATES,
+    towardWater: NARR_TOWARD_WATER_TEMPLATES,
+    moodChanged: [(s) => narrPick(NARR_MOOD_TEMPLATES[s.moodBand], "mood_" + s.moodBand, s)],
+  };
+  // most narratively significant first -- when several real things change
+  // in the same tick, the caption announces the single most notable one
+  // rather than trying to cram all of them in.
+  const NARR_EVENT_PRIORITY = [
+    "peerArrived", "foodReplenished", "waterReplenished", "arrivedFood", "arrivedWater",
+    "foodDepleted", "waterDepleted", "actionChanged", "towardFood", "towardWater", "moodChanged", "peerLeft",
+  ];
+
+  function narrateDetectEvents(prev, cur) {
+    const events = [];
+    if (!prev) return events;
+    if (!prev.peerNear && cur.peerNear) events.push("peerArrived");
+    if (prev.peerNear && !cur.peerNear) events.push("peerLeft");
+    if (prev.foodBand === "depleted" && cur.foodBand !== "depleted") events.push("foodReplenished");
+    if (prev.foodBand !== "depleted" && cur.foodBand === "depleted") events.push("foodDepleted");
+    if (prev.waterBand === "depleted" && cur.waterBand !== "depleted") events.push("waterReplenished");
+    if (prev.waterBand !== "depleted" && cur.waterBand === "depleted") events.push("waterDepleted");
+    if (!prev.atFood && cur.atFood) events.push("arrivedFood");
+    if (!prev.atWater && cur.atWater) events.push("arrivedWater");
+    if (prev.action !== cur.action) events.push("actionChanged");
+    if (!prev.towardFood && cur.towardFood) events.push("towardFood");
+    if (!prev.towardWater && cur.towardWater) events.push("towardWater");
+    if (prev.moodBand !== cur.moodBand) events.push("moodChanged");
+    return events;
+  }
+
+  // the periodic fallback: a truthful two-part restatement of the CURRENT
+  // steady state (what it's doing + the single most relevant real context
+  // for right now), not tied to any transition -- used only when nothing
+  // notable has changed in a while, so the caption doesn't sit frozen.
+  function narrateComposite(s) {
+    const sentence = narrPick(NARR_ACTION_TEMPLATES[s.action] || NARR_ACTION_TEMPLATES.idle, "action_" + s.action, s);
+    let context;
+    if (s.atFood) context = narrPick(NARR_AT_FOOD_TEMPLATES, "atfood", s);
+    else if (s.atWater) context = narrPick(NARR_AT_WATER_TEMPLATES, "atwater", s);
+    else if (s.towardFood) context = narrPick(NARR_TOWARD_FOOD_TEMPLATES, "towardfood_c", s);
+    else if (s.towardWater) context = narrPick(NARR_TOWARD_WATER_TEMPLATES, "towardwater_c", s);
+    else if (s.peerNear) context = narrPick(NARR_PEER_NEAR_TEMPLATES, "peernear_c", s);
+    else context = narrPick(NARR_MOOD_TEMPLATES[s.moodBand], "mood_c_" + s.moodBand, s);
+    return sentence + " " + context;
+  }
+
+  const narratorTextEl = document.getElementById("narrator-text");
+  function setNarratorText(text) {
+    // a soft crossfade (not an instant swap) -- visually distinct from the
+    // raw HUD numbers above, which update every tick with no transition at
+    // all; the caption is meant to read as a considered observation, not a
+    // counter ticking over.
+    narratorTextEl.classList.add("narrator-fade");
+    setTimeout(() => {
+      narratorTextEl.textContent = text;
+      narratorTextEl.classList.remove("narrator-fade");
+    }, 260);
+  }
+
+  let narratorPrevSituation = null;
+  let narratorPending = null; // { text } -- a real, already-detected event waiting out the cooldown
+  let narratorLastUpdateAt = 0;
+  // test-harness-only: the exact {text, tick, situation} that produced the
+  // caption currently on screen -- lets a Playwright check verify the
+  // caption against the REAL tick that actually triggered it, not against
+  // whatever tick happens to be current several seconds later. Cheap
+  // (three references), kept unconditionally (mirrors this file's existing
+  // FLYBREAK_DEBUG pattern of a plain variable exposed only through the
+  // gated window.__flybreak object below, not gated itself).
+  let narratorLastFired = null;
+
+  function updateNarrator(tick) {
+    const situation = narrateComputeSituation(tick);
+    const now = performance.now();
+    const events = narrateDetectEvents(narratorPrevSituation, situation);
+    for (const ev of NARR_EVENT_PRIORITY) {
+      if (events.indexOf(ev) !== -1) {
+        // a real transition detected on THIS tick -- but don't let it
+        // clobber an already-queued, still-more-important pending event
+        // from an earlier tick that just hasn't cleared cooldown yet (e.g.
+        // a peer arriving, waiting to be shown, must not be silently
+        // replaced by an ordinary action change a moment later): only
+        // overwrite when nothing is queued yet, or the new event outranks
+        // (or ties) what's already queued.
+        const newRank = NARR_EVENT_PRIORITY.indexOf(ev);
+        const pendingRank = narratorPending ? NARR_EVENT_PRIORITY.indexOf(narratorPending.ev) : Infinity;
+        if (newRank <= pendingRank) {
+          narratorPending = { ev, text: narrPick(NARR_EVENT_TEMPLATES[ev], ev, situation) };
+        }
+        break; // only the single most notable real event this tick
+      }
+    }
+    if (narratorPending && (now - narratorLastUpdateAt >= NARRATOR_MIN_INTERVAL_MS || narratorLastUpdateAt === 0)) {
+      setNarratorText(narratorPending.text);
+      narratorLastFired = { text: narratorPending.text, tick, situation };
+      narratorPending = null;
+      narratorLastUpdateAt = now;
+    } else if (!narratorPending && now - narratorLastUpdateAt >= NARRATOR_PERIODIC_MS) {
+      const text = narrateComposite(situation);
+      setNarratorText(text);
+      narratorLastFired = { text, tick, situation };
+      narratorLastUpdateAt = now;
+    }
+    narratorPrevSituation = situation;
   }
 
   // ---- synapse map: a real ~200-250-neuron induced subgraph of the actual
@@ -1368,6 +1714,9 @@
       synapseScene, synapseCamera, synapseRenderer, synapseGroup: () => synapseGroup,
       getLatestTick: () => latest,
       getFrameCount: () => __flybreak_frameCount,
+      // the exact {text, tick, situation} behind the caption currently on
+      // screen -- see narratorLastFired's own comment above.
+      getNarratorLastFired: () => narratorLastFired,
     };
   }
 
