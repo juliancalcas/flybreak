@@ -60,6 +60,7 @@
   .region-bar-fill { background: #5affa0; height: 100%; transition: width 0.15s linear; }
   .food-bar-fill { background: #ff9d3d; }
   .water-bar-fill { background: #4ad8ff; }
+  .salt-bar-fill { background: #c9a6ff; }
 
   #status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 6px; }
   .status-connected { background: #5affa0; box-shadow: 0 0 6px #5affa0; }
@@ -74,6 +75,17 @@
     border-radius: 4px; padding: 3px 8px; margin-top: 6px;
   }
   #mood-mode-btn:hover { background: rgba(120,255,170,0.2); }
+
+  /* ---- day/night cycle control (see world.clock/set_cycle_length_s in
+     the script below) -- its own small panel, same visual language as
+     #mood-panel (a .panel plus one input), placed next to it. */
+  #clock-panel { width: 220px; }
+  #clock-icon { font-size: 15px; margin-right: 4px; }
+  #cycle-input {
+    width: 100%; margin-top: 4px; accent-color: #8fd9ff;
+    background: rgba(5,15,10,0.4); color: inherit; border: 1px solid rgba(120,255,170,0.35);
+    border-radius: 4px; padding: 3px 6px; font: inherit; box-sizing: border-box;
+  }
 
   #mesh-loading {
     position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%);
@@ -181,6 +193,8 @@
       <div class="region-bar-track"><div class="region-bar-fill food-bar-fill" id="food-bar" style="width:0%"></div></div>
       <div class="row"><span class="label">water</span><span id="water-value">-</span></div>
       <div class="region-bar-track"><div class="region-bar-fill water-bar-fill" id="water-bar" style="width:0%"></div></div>
+      <div class="row"><span class="label">salt</span><span id="salt-value">-</span></div>
+      <div class="region-bar-track"><div class="region-bar-fill salt-bar-fill" id="salt-bar" style="width:0%"></div></div>
     </div>
 
     <div class="panel regions">
@@ -194,6 +208,14 @@
     <input id="mood-slider" type="range" min="0" max="1" step="0.01" value="0" />
     <div class="mood-scale"><span>feliz</span><span>muy feliz</span><span>plena</span></div>
     <button id="mood-mode-btn" type="button">mode: auto</button>
+  </div>
+
+  <!-- day/night cycle: world.clock (schema "1.7"), see the script's
+       updateClock()/applySunMoon() for what reads this and how. -->
+  <div class="panel" id="clock-panel">
+    <div class="row"><span id="clock-icon">&#9728;&#65039;</span><span id="clock-time">--:--</span><span class="label" id="clock-label">day</span></div>
+    <div class="row"><span class="label">cycle length (min)</span></div>
+    <input id="cycle-input" type="number" min="1" max="1440" step="1" value="60" />
   </div>
 
   <div class="panel" id="synapse-panel">
@@ -286,6 +308,11 @@
       ? THREE.MathUtils.clamp(tick.activity.food_supply, 0, 1) : 1;
     waterSupplyTarget = (typeof tick.activity.water_supply === "number")
       ? THREE.MathUtils.clamp(tick.activity.water_supply, 0, 1) : 1;
+    // activity.salt_supply (schema "1.7"): same clean, zero-smoothing
+    // field as food_supply/water_supply above, for the separate real
+    // net.salt_mask channel -- see engine/server.py's SALT_POSITION.
+    saltSupplyTarget = (typeof tick.activity.salt_supply === "number")
+      ? THREE.MathUtils.clamp(tick.activity.salt_supply, 0, 1) : 1;
 
     const foodPct = Math.round(foodSupplyTarget * 100);
     document.getElementById("food-value").textContent = foodPct + "%";
@@ -293,14 +320,57 @@
     const waterPct = Math.round(waterSupplyTarget * 100);
     document.getElementById("water-value").textContent = waterPct + "%";
     document.getElementById("water-bar").style.width = waterPct + "%";
+    const saltPct = Math.round(saltSupplyTarget * 100);
+    document.getElementById("salt-value").textContent = saltPct + "%";
+    document.getElementById("salt-bar").style.width = saltPct + "%";
     foodActivity = tick.activity.food_activity;
+    saltActivity = (typeof tick.activity.salt_activity === "number") ? tick.activity.salt_activity : saltActivity;
 
     // each landmark's own real proximity to the fly's actual position
-    // (tick.motor_state.position) -- used below so food/water pulse
-    // independently even though they honestly share one real signal.
+    // (tick.motor_state.position) -- used below so food/water/salt pulse
+    // independently even though food/water honestly share one real signal.
     const pos = tick.motor_state.position;
     foodProximity = proximityWeight(pos.x, pos.z, FOOD_POSITION.x, FOOD_POSITION.z);
     waterProximity = proximityWeight(pos.x, pos.z, WATER_POSITION.x, WATER_POSITION.z);
+    saltProximity = proximityWeight(pos.x, pos.z, SALT_POSITION.x, SALT_POSITION.z);
+
+    // world.clock (schema "1.7") -- read every tick here, applied every
+    // render frame by animate()'s own applySunMoon() call (see that
+    // function's comment for why no extrapolation between ticks is
+    // needed). Falls back to the existing default (noon, 3600s) for an
+    // older engine/mock not yet on schema "1.7".
+    if (tick.world.clock) latestClock = tick.world.clock;
+    const clockMinutes = Math.round(latestClock.time_of_day * 24 * 60);
+    const hh = String(Math.floor(clockMinutes / 60) % 24).padStart(2, "0");
+    const mm = String(clockMinutes % 60).padStart(2, "0");
+    document.getElementById("clock-time").textContent = hh + ":" + mm;
+    const isDay = latestClock.time_of_day > 0.25 && latestClock.time_of_day < 0.75;
+    document.getElementById("clock-icon").textContent = isDay ? "☀️" : "\u{1F319}";
+    document.getElementById("clock-label").textContent = isDay ? "day" : "night";
+    // only reflect the engine's real current value into the input while
+    // the user isn't actively editing it -- same "don't fight the user's
+    // finger" principle the mood slider already follows below.
+    if (document.activeElement !== cycleInput) {
+      cycleInput.value = Math.round(latestClock.cycle_length_s / 60);
+    }
+
+    // world.dangers (schema "1.7") -- real server-authoritative positions
+    // (see engine/server.py's dangers module comment). Meshes are grown
+    // lazily to match whatever length the engine actually sends, then
+    // reused tick-to-tick by index; animate() eases each one's rendered
+    // position toward dangerMeshes[i].userData.targetPos, same technique
+    // applyFlyState/updateFlyInstance already use for fly position.
+    const dangers = tick.world.dangers || [];
+    for (let i = dangerMeshes.length; i < dangers.length; i++) {
+      const mesh = new THREE.Mesh(dangerGeo, dangerMat);
+      mesh.userData.targetPos = { x: 0, z: 0 };
+      scene.add(mesh);
+      dangerMeshes.push(mesh);
+    }
+    for (let i = 0; i < dangers.length; i++) {
+      dangerMeshes[i].userData.targetPos.x = dangers[i].position.x;
+      dangerMeshes[i].userData.targetPos.z = dangers[i].position.z;
+    }
 
     const list = document.getElementById("region-list");
     list.innerHTML = "";
@@ -383,6 +453,22 @@
     mode = next;
     modeBtn.textContent = "mode: " + mode + (mode === "manual" ? " (tap to release)" : "");
   }
+
+  // ---- day/night cycle length control (world.clock.cycle_length_s,
+  // schema "1.7") -- real user requirement ("yo tengo que poder
+  // modificarlo"): the default 1-real-hour-per-day compression is a
+  // starting point, not fixed. Minutes in the UI (friendlier than raw
+  // seconds for a human to type), converted to real seconds on send --
+  // engine/server.py's World clamps server-side too
+  // (_MIN_CYCLE_LENGTH_S/_MAX_CYCLE_LENGTH_S), this input's own min/max
+  // (see the HTML) just keeps the UI from showing an obviously-useless
+  // value before that round-trip.
+  const cycleInput = document.getElementById("cycle-input");
+  cycleInput.addEventListener("change", () => {
+    const minutes = parseFloat(cycleInput.value);
+    if (!isFinite(minutes) || minutes <= 0) return;
+    sendControl({ type: "set_cycle_length_s", value: minutes * 60 });
+  });
 
   // ---- narrator caption: a short, warm, observational sentence (or two)
   // translating the REAL, currently-arriving tick into readable language --
@@ -1148,16 +1234,170 @@
   renderer.setPixelRatio(window.devicePixelRatio);
   renderer.setSize(window.innerWidth, window.innerHeight);
   renderer.setClearColor(0x05070a);
+  // Real shadows (user request: "sombras", driven by a real sun position --
+  // see applySunMoon() below) need the renderer's shadow map turned on and
+  // at least one light/caster/receiver trio configured for it -- none of
+  // that existed before (flyKeyLight below was a plain unshadowed fill
+  // light). PCFSoftShadowMap over the default (hard-edged) map so the real
+  // shadow doesn't look like a jagged cutout at this scene's render scale.
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
   container.appendChild(renderer.domElement);
 
   // real shading for the real flybody mesh (see createFlyMesh below) --
   // MeshBasicMaterial everywhere else in this scene (city, grid, food,
   // water, synapse points) ignores lights entirely, so this only changes
   // how the fly itself looks, nothing else.
-  scene.add(new THREE.HemisphereLight(0x8fd9ff, 0x14241c, 0.6));
-  const flyKeyLight = new THREE.DirectionalLight(0xfff2d9, 0.9);
-  flyKeyLight.position.set(4, 8, 6);
-  scene.add(flyKeyLight);
+  //
+  // ---- day/night cycle (world.clock, schema "1.7") -- see
+  // applySunMoon() below for the real sun/moon arc formula and
+  // engine/server.py's own _DEFAULT_CYCLE_LENGTH_S comment for why this
+  // is a pure rendering/lighting feature, not a neural one: nothing in
+  // the real connectome data is labeled as a circadian/clock population,
+  // so time_of_day never touches the LIF network at all, only what gets
+  // drawn here.
+  const skyLight = new THREE.HemisphereLight(0x8fd9ff, 0x14241c, 0.6);
+  scene.add(skyLight);
+
+  // "sun": the one light in this scene that casts real shadows (user
+  // request -- "sombras"). Renamed from the old flyKeyLight (same light,
+  // same original purpose of lighting the fly) now that it does double
+  // duty as the actual day/night sun.
+  const sunLight = new THREE.DirectionalLight(0xfff2d9, 0.9);
+  sunLight.castShadow = true;
+  // Shadow camera frustum: an orthographic box sized to comfortably cover
+  // where the 3 flies + landmarks + dangers actually move (roughly a
+  // 25-unit radius around the origin -- SALT/FOOD/WATER_POSITION's own
+  // ~7.8-unit ring plus the dangers' ~11-unit band, with headroom), not
+  // the whole ~85-unit city radius -- shadow resolution is spent on the
+  // part of the scene that actually needs it. 1024x1024 map: enough
+  // resolution at this frustum size for a crisp fly-sized shadow without
+  // the cost of a full 2048+ map this scene doesn't need.
+  sunLight.shadow.mapSize.set(1024, 1024);
+  sunLight.shadow.camera.left = -25; sunLight.shadow.camera.right = 25;
+  sunLight.shadow.camera.top = 25; sunLight.shadow.camera.bottom = -25;
+  sunLight.shadow.camera.near = 1; sunLight.shadow.camera.far = 150;
+  scene.add(sunLight);
+  scene.add(sunLight.target);
+
+  // "moon": a second, dimmer, cool-toned light active at night (no
+  // shadow -- one real shadow-casting light is enough to deliver the
+  // actual "sombras" request without doubling the render cost; the
+  // moon's job is ambient night-time fill + the visible moon sprite
+  // below, not a second real shadow).
+  const moonLight = new THREE.DirectionalLight(0x8fb4ff, 0.0);
+  scene.add(moonLight);
+  scene.add(moonLight.target);
+
+  // Visible sun/moon discs -- unlit (MeshBasicMaterial, same as every
+  // other non-fly object in this scene), positioned far along their own
+  // light's real direction each frame (see applySunMoon()) so what you
+  // SEE moving across the sky is the same real angle driving the
+  // lighting/shadow, not a separate decorative animation.
+  const SUN_DISC_DISTANCE = 120;
+  const sunDisc = new THREE.Mesh(
+    new THREE.SphereGeometry(6, 16, 16),
+    new THREE.MeshBasicMaterial({ color: 0xfff2d9 })
+  );
+  scene.add(sunDisc);
+  const moonDisc = new THREE.Mesh(
+    new THREE.SphereGeometry(4, 16, 16),
+    new THREE.MeshBasicMaterial({ color: 0xcdd9ff, transparent: true, opacity: 0.85 })
+  );
+  scene.add(moonDisc);
+
+  // Real ground plane: receives the real shadow above. Previously there
+  // was only GridHelper (pure lines -- nothing for a shadow to land on).
+  // Kept dark/subtle (close to the scene's existing background/fog color,
+  // just enough brighter under full daylight for a cast shadow to read)
+  // so it doesn't change the established wireframe-city look at a glance,
+  // and set fractionally below the grid's own y=0 to avoid z-fighting
+  // with GridHelper's lines.
+  const groundMat = new THREE.MeshStandardMaterial({ color: 0x070e0a, roughness: 1.0, metalness: 0.0 });
+  const ground = new THREE.Mesh(new THREE.PlaneGeometry(220, 220), groundMat);
+  ground.rotation.x = -Math.PI / 2;
+  ground.position.y = -0.02;
+  ground.receiveShadow = true;
+  scene.add(ground);
+
+  // Real sun-angle formula: a full lap of the sky per day/night cycle,
+  // noon (time_of_day=0.5) directly overhead, midnight (0.0/1.0) directly
+  // below the ground (light/visible-disc intensity both clamp to ~0 there
+  // -- see applySunMoon()). angle=0 at noon keeps the overhead case simple
+  // (straight up, no horizontal component needed).
+  function _sunAngle(timeOfDay) { return (timeOfDay - 0.5) * Math.PI * 2; }
+
+  // Color temperature across the day: warm/low at sunrise+sunset, neutral
+  // white at noon -- real, if simplified, atmospheric color-temperature
+  // behavior (the sun's light passes through more atmosphere at a low
+  // angle, scattering more blue out and leaving the red/orange end), not
+  // an arbitrary palette choice.
+  const _sunColorDay = new THREE.Color(0xfff2d9);
+  const _sunColorHorizon = new THREE.Color(0xff8a4d);
+  const _skyColorDay = new THREE.Color(0x8fd9ff);
+  const _skyColorNight = new THREE.Color(0x0b1430);
+  const _groundSkyColorDay = new THREE.Color(0x14241c);
+  const _groundSkyColorNight = new THREE.Color(0x040a08);
+  const _fogColorDay = new THREE.Color(0x4a6a78);
+  const _fogColorNight = new THREE.Color(0x05070a);
+  const _bgColorDay = new THREE.Color(0x0e1b24);
+  const _bgColorNight = new THREE.Color(0x05070a);
+  const _tmpSunColor = new THREE.Color();
+  const _tmpSkyColor = new THREE.Color();
+  const _tmpGroundSkyColor = new THREE.Color();
+  const _tmpFogColor = new THREE.Color();
+  const _tmpBgColor = new THREE.Color();
+
+  // Drives the sun/moon lights, their visible discs, and the sky/fog/
+  // background colors from one real time_of_day value -- called every
+  // render frame (see animate()) with the latest known
+  // tick.world.clock.time_of_day (no extrapolation between ticks needed:
+  // at the default 3600s cycle, even the engine's own ~50ms tick interval
+  // is a tiny angular step, far smaller than one rendered frame could
+  // show as a jump).
+  function applySunMoon(timeOfDay) {
+    const sunAngle = _sunAngle(timeOfDay);
+    const sunElevation = Math.cos(sunAngle); // 1 at noon, -1 at midnight
+    const sunDir = new THREE.Vector3(Math.sin(sunAngle) * 0.4, sunElevation, 0.6).normalize();
+    sunLight.position.copy(sunDir).multiplyScalar(40);
+    sunLight.target.position.set(0, 0, 0);
+    sunDisc.position.copy(sunDir).multiplyScalar(SUN_DISC_DISTANCE);
+
+    // Moon is exactly opposite the sun (real analog of "up when the sun
+    // is down") -- same direction formula, half a cycle out of phase.
+    const moonDir = sunDir.clone().multiplyScalar(-1);
+    moonLight.position.copy(moonDir).multiplyScalar(40);
+    moonLight.target.position.set(0, 0, 0);
+    moonDisc.position.copy(moonDir).multiplyScalar(SUN_DISC_DISTANCE * 0.9);
+
+    // Intensity/visibility clamp to 0 below the horizon (elevation<0) --
+    // real daylight doesn't light the scene from underground. dayness in
+    // [0,1] also drives the color/sky/fog lerps below, so everything
+    // transitions on the same real curve, not independently-tuned fades.
+    const dayness = THREE.MathUtils.clamp(sunElevation, 0, 1);
+    const nightness = THREE.MathUtils.clamp(-sunElevation, 0, 1);
+    sunLight.intensity = dayness * 0.95;
+    sunDisc.material.opacity = dayness; // MeshBasicMaterial default opacity=1; set transparent below once
+    sunDisc.visible = dayness > 0.01;
+    moonLight.intensity = nightness * 0.35;
+    moonDisc.visible = nightness > 0.01;
+
+    _tmpSunColor.copy(_sunColorHorizon).lerp(_sunColorDay, Math.min(1, dayness * 2));
+    sunLight.color.copy(_tmpSunColor);
+
+    _tmpSkyColor.copy(_skyColorNight).lerp(_skyColorDay, dayness);
+    _tmpGroundSkyColor.copy(_groundSkyColorNight).lerp(_groundSkyColorDay, dayness);
+    skyLight.color.copy(_tmpSkyColor);
+    skyLight.groundColor.copy(_tmpGroundSkyColor);
+    skyLight.intensity = 0.25 + dayness * 0.45;
+
+    _tmpFogColor.copy(_fogColorNight).lerp(_fogColorDay, dayness * 0.6);
+    scene.fog.color.copy(_tmpFogColor);
+    _tmpBgColor.copy(_bgColorNight).lerp(_bgColorDay, dayness * 0.6);
+    renderer.setClearColor(_tmpBgColor);
+  }
+  sunDisc.material.transparent = true;
+  applySunMoon(0.5); // start at noon so the very first frame (before any tick) is already lit
 
   const gridColor = 0x1c5a3a;
   scene.add(new THREE.GridHelper(200, 40, gridColor, gridColor));
@@ -1399,6 +1639,15 @@
       }
     }
 
+    // Real shadow casting (user request -- "sombras"): every real mesh
+    // in this fly (body parts + the two mirrored wing pivots) casts the
+    // sun's shadow onto the ground plane below -- see sunLight/ground
+    // above. MeshBasicMaterial objects elsewhere in the scene (city,
+    // landmarks, dangers) stay unlit and un-shadowed on purpose (see
+    // sunLight's own comment on scope), so only the fly -- the one thing
+    // in this scene already using real lit MeshStandardMaterial -- casts.
+    group.traverse((obj) => { if (obj.isMesh) obj.castShadow = true; });
+
     return { group, parts, wingL, wingR };
   }
 
@@ -1493,6 +1742,7 @@
   // flicker on top, same real signal it always was.
   const FOOD_POSITION = { x: 6, z: 5 };
   const WATER_POSITION = { x: -6, z: -5 };
+  const SALT_POSITION = { x: -6, z: 5 }; // matches engine/server.py's SALT_POSITION exactly
 
   const foodMat = new THREE.MeshBasicMaterial({ color: 0xff9d3d, wireframe: true, transparent: true, opacity: 0.5 });
   const food = new THREE.Mesh(new THREE.IcosahedronGeometry(1.1, 1), foodMat);
@@ -1506,9 +1756,52 @@
   water.position.set(WATER_POSITION.x, 1.4, WATER_POSITION.z);
   scene.add(water);
 
+  // salt: a third, genuinely distinct real channel (engine/server.py's
+  // net.salt_mask -- see SALT_POSITION's own comment there) -- its own
+  // shape (octahedron, distinct from food's icosahedron and water's
+  // torus) and the same lavender used for its HUD bar (.salt-bar-fill).
+  const saltMat = new THREE.MeshBasicMaterial({ color: 0xc9a6ff, wireframe: true, transparent: true, opacity: 0.5 });
+  const salt = new THREE.Mesh(new THREE.OctahedronGeometry(1.0, 0), saltMat);
+  salt.position.set(SALT_POSITION.x, 1.4, SALT_POSITION.z);
+  scene.add(salt);
+
+  // ---- day/night clock state (world.clock, schema "1.7") -- the latest
+  // real value off the wire, read every animate() frame by applySunMoon()
+  // above (see its own comment for why no extrapolation is needed).
+  // Starts at noon (0.5), matching applySunMoon(0.5)'s own initial call
+  // above, so the HUD clock readout and the actual lit scene agree before
+  // the first tick arrives.
+  let latestClock = { time_of_day: 0.5, cycle_length_s: 3600 };
+
+  // ---- dangers (world.dangers, schema "1.7") -- real, server-authoritative
+  // positions (see engine/server.py's DANGER_ORBIT_*/DANGER_PATROL_* and
+  // the dangers' own "non-lethal, never a fear stimulus" module comment
+  // there). Rendered as a small, neutral wireframe shape -- deliberately
+  // NOT a spiky/monstrous/predator-like design: the same "never presented
+  // as a threat" standard this project already holds its narrator-caption
+  // wording to (frontend's own narrateComputeSituation comment) applies
+  // to what a danger LOOKS like too, not just what it's called. A plain
+  // dodecahedron, muted amber-grey, reads as "another moving object to
+  // route around" rather than anything frightening. Two fixed instances
+  // (DANGER_ORBIT_*/DANGER_PATROL_* are each exactly one real mover), not
+  // a dynamically-sized pool -- schema's world.dangers array could in
+  // principle carry a different count from a future engine, so the
+  // render loop below still iterates it generically rather than assuming
+  // exactly 2.
+  const dangerMat = new THREE.MeshBasicMaterial({ color: 0x9a8f7a, wireframe: true, transparent: true, opacity: 0.6 });
+  const dangerGeo = new THREE.DodecahedronGeometry(0.85, 0);
+  const dangerMeshes = []; // grown lazily as real world.dangers entries arrive -- see renderHud()
+  // Same smoothing factor as fly position's own POSITION_LERP (defined
+  // further down this file) -- same ~20Hz-tick-into-60fps reasoning,
+  // duplicated as its own constant here only because POSITION_LERP isn't
+  // declared yet at this point in the file.
+  const DANGER_POSITION_LERP = 0.12;
+
   let foodActivity = 0.3; // baseline noise floor until the first tick arrives
+  let saltActivity = 0.3;
   let foodProximity = 0;
   let waterProximity = 0;
+  let saltProximity = 0;
 
   // clean supply state (activity.food_supply/water_supply, schema "1.6"):
   // *Target* is the latest real value straight off the wire, updated once
@@ -1522,8 +1815,8 @@
   // The lerp factor is high enough that a real respawn (supply snapping
   // 0 -> 1 in the underlying data) still reads as a genuine snap within a
   // couple of frames, not a slow fade that would hide the reset.
-  let foodSupplyTarget = 1, waterSupplyTarget = 1;
-  let foodSupplyDisplay = 1, waterSupplyDisplay = 1;
+  let foodSupplyTarget = 1, waterSupplyTarget = 1, saltSupplyTarget = 1;
+  let foodSupplyDisplay = 1, waterSupplyDisplay = 1, saltSupplyDisplay = 1;
   // a per-SECOND rate (not a fixed per-frame fraction like the rest of this
   // file's POSITION_LERP) -- multiplied by real dt each frame in animate()
   // below, so the display genuinely converges to the target within a fixed
@@ -1620,6 +1913,25 @@
     const supplyLerpFactor = Math.min(1, SUPPLY_LERP_RATE * rawDt);
     foodSupplyDisplay += (foodSupplyTarget - foodSupplyDisplay) * supplyLerpFactor;
     waterSupplyDisplay += (waterSupplyTarget - waterSupplyDisplay) * supplyLerpFactor;
+    saltSupplyDisplay += (saltSupplyTarget - saltSupplyDisplay) * supplyLerpFactor;
+
+    // real sun/moon position + lighting/sky/fog colors for this frame --
+    // see applySunMoon()'s own comment for why the latest tick's
+    // time_of_day is used directly, no extrapolation.
+    applySunMoon(latestClock.time_of_day);
+
+    // dangers: ease each one's rendered position toward the latest real
+    // tick's target (see renderHud()'s own comment), same POSITION_LERP-
+    // style smoothing as fly position -- a slow continuous rotate on top
+    // so even a momentarily-stalled connection doesn't look frozen-dead.
+    for (const mesh of dangerMeshes) {
+      const t = mesh.userData.targetPos;
+      mesh.position.x += (t.x - mesh.position.x) * DANGER_POSITION_LERP;
+      mesh.position.z += (t.z - mesh.position.z) * DANGER_POSITION_LERP;
+      mesh.position.y = 1.4;
+      mesh.rotation.x += 0.004;
+      mesh.rotation.y += 0.006;
+    }
 
     // PRIMARY driver: the clean supply level sets each landmark's baseline
     // size/opacity, so "is this running out" reads correctly from across
@@ -1653,6 +1965,16 @@
     water.scale.setScalar(Math.max(0.05, waterBaseScale * (1 + waterFlicker)));
     water.rotation.y += 0.002 + waterPulseVal * 0.01;
     waterMat.opacity = THREE.MathUtils.clamp(waterBaseOpacity + waterPulseVal * 0.22, 0, 1);
+
+    const SALT_SCALE_MIN = 0.4, SALT_OPACITY_MIN = 0.08, SALT_OPACITY_MAX = 0.55;
+    const saltBaseScale = SALT_SCALE_MIN + (1 - SALT_SCALE_MIN) * saltSupplyDisplay;
+    const saltBaseOpacity = SALT_OPACITY_MIN + (SALT_OPACITY_MAX - SALT_OPACITY_MIN) * saltSupplyDisplay;
+    const saltPulseVal = saltActivity * saltProximity;
+    const saltPeriod = 500 - saltPulseVal * 300;
+    const saltFlicker = Math.sin(performance.now() / saltPeriod) * (0.04 + saltPulseVal * 0.14);
+    salt.scale.setScalar(Math.max(0.05, saltBaseScale * (1 + saltFlicker)));
+    salt.rotation.y += 0.002 + saltPulseVal * 0.01;
+    saltMat.opacity = THREE.MathUtils.clamp(saltBaseOpacity + saltPulseVal * 0.22, 0, 1);
 
     // orbit close enough that the fly and its anatomy are actually legible
     // (was 28-38 units out -- a few pixels on screen at that range, no
@@ -1707,9 +2029,10 @@
       getZoomMultiplier: () => zoomMultiplier,
       getCameraTarget: () => (fly0 ? fly0.group.position : ORIGIN),
       getSupplyState: () => ({
-        foodSupplyTarget, waterSupplyTarget, foodSupplyDisplay, waterSupplyDisplay,
-        foodScale: food.scale.x, waterScale: water.scale.x,
-        foodOpacity: foodMat.opacity, waterOpacity: waterMat.opacity,
+        foodSupplyTarget, waterSupplyTarget, saltSupplyTarget,
+        foodSupplyDisplay, waterSupplyDisplay, saltSupplyDisplay,
+        foodScale: food.scale.x, waterScale: water.scale.x, saltScale: salt.scale.x,
+        foodOpacity: foodMat.opacity, waterOpacity: waterMat.opacity, saltOpacity: saltMat.opacity,
       }),
       synapseScene, synapseCamera, synapseRenderer, synapseGroup: () => synapseGroup,
       getLatestTick: () => latest,
@@ -1717,6 +2040,9 @@
       // the exact {text, tick, situation} behind the caption currently on
       // screen -- see narratorLastFired's own comment above.
       getNarratorLastFired: () => narratorLastFired,
+      getClock: () => latestClock,
+      getDangerMeshes: () => dangerMeshes,
+      sunLight, moonLight, sunDisc, moonDisc, applySunMoon,
     };
   }
 

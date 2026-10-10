@@ -9,11 +9,14 @@ simulation's metrics.
 The eventual goal is an embodied fly in a calm environment with food and
 water sources and other flies of its own species to encounter -- never a
 fear/threat stimulus. Most of the pieces now exist: a real, authoritative
-position, a food landmark and a water landmark the fly actually moves
-toward, and a shared world of 3 flies (one controlled, two autonomous)
-that can sense each other and end up nearby. See "Where this is headed"
-below for exactly what's built, what's still simplified, and what's
-genuinely not built yet.
+position, three real landmarks (food, water, and a third real taste --
+salt) the fly actually moves toward, a shared world of 3 flies (one
+controlled, two autonomous) that can sense each other and end up nearby,
+a real day/night cycle with real cast shadows, and two non-lethal,
+continuously-moving dangers that create real avoidance pressure without
+ever wiring a fear/aversive stimulus. See "Where this is headed" below
+for exactly what's built, what's still simplified, and what's genuinely
+not built yet.
 
 ## Quick start
 
@@ -112,7 +115,13 @@ python -m engine.server            # ws://127.0.0.1:8765, one shared World (3 fl
 - `schema_v1.json` -- JSON Schema for one tick, matching the shape agreed
   in the project brief (`schema_version`, `tick`, `sim_time_ms`,
   `stimulus`, `activity`, `motor_state`, `meta`, `world`). Currently
-  `"1.6"` -- bumped from `"1.5"` when `activity.food_supply`/
+  `"1.7"` -- bumped from `"1.6"` when `activity.salt_activity`/
+  `activity.salt_supply` (a third, genuinely separate real taste channel
+  -- see "Salt, a third real taste" below) and `world.clock`/
+  `world.dangers` (the day/night cycle and the two non-lethal dangers --
+  see "A day/night cycle" and "Non-lethal, moving dangers" below) were
+  added, both now required on every tick. `"1.6"` was bumped from `"1.5"`
+  when `activity.food_supply`/
   `activity.water_supply` (each a plain `0..1` number, required) were
   added: a real, exact, zero-smoothing/zero-noise read of `World.food_
   supply`/`water_supply` (see "Food and water sources" below) -- a clean
@@ -639,6 +648,74 @@ leaves out, honestly, follows each.
   proximity, the neutral visual-sensing boost, and now not-overlapping --
   no grooming, courtship, or any other real conspecific interaction
   `solomonsealed/flybrain`'s own richer simulation models.
+- **Salt, a third real taste**: `SALT_POSITION` (`(-6, 5)`, the one
+  remaining quadrant, same ~7.81-unit distance from spawn as the other
+  two) drives `net.salt_mask` (`class == "gustatory"`, `sub_class ==
+  "low-salt"`, **19 real neurons**) -- unlike `WATER_POSITION`, which
+  deliberately reuses `net.food_mask` (see "Food and water sources"
+  above), salt gets its own real, separately-labeled population instead,
+  since the real data separately identifies it (checked directly against
+  `classification.csv.gz`'s real `class == "gustatory"` value_counts:
+  `sugar/water` 129, `bitter` 65, `low-salt` 19, among several other real
+  but narrower sub_classes -- `taste_peg`, `SA_VTV_pro_meso_meta`, the
+  `*_pharyngeal_nerve_*` groups -- none with a clear appetitive/aversive
+  identity the way these three have). Same boost magnitude/range/EMA
+  shape as food (`_SALT_BOOST`/`_SALT_RANGE` mirror `_FOOD_BOOST`/
+  `_FOOD_RANGE` exactly), and the same supply/depletion/respawn mechanic
+  (`World.salt_supply`, reusing `_advance_one_supply` generically -- see
+  `server.py`). Measured separately given the much smaller real
+  population (19 vs. 129 neurons): salt_mask's spike fraction is
+  ~0.30-0.31 unboosted, ~0.43-0.44 boosted (seeds 0-2) -- smaller swing
+  than food's ~0.21-0.56, more tick-to-tick sampling noise (expected at
+  this population size), but real and monotonic. The chemotaxis target
+  pick (`server.py`'s `step()`) now genuinely chooses among all three
+  landmarks each tick, not just food/water. Still narrow: only one real
+  "low-salt" population exists in the data, so there is no further
+  salt-concentration gradient or multiple salt sources.
+- **A day/night cycle**: `World.clock_state()` derives a continuous
+  `time_of_day` (0.0 = midnight, 0.25 = sunrise, 0.5 = noon, 0.75 =
+  sunset) from the World's own already-authoritative elapsed sim time --
+  not a separately-advanced counter, so it can never drift out of sync
+  with the ticks actually run. `cycle_length_s` (real seconds per full
+  lap) defaults to 3600 (one real hour per simulated day, matching the
+  real request literally -- "en vez de 24 horas es una hora") and is
+  user-adjustable at runtime (`set_cycle_length_s`, clamped to
+  `[60, 86400]` seconds server-side, with a minutes-based input in the
+  HUD). This is deliberately a WORLD/RENDERING variable, not a neural
+  one: checked directly, nothing in `classification.csv.gz`/
+  `neurons.csv.gz` (`class`, `sub_class`, or `group`) is labeled as a
+  circadian/clock population at any granularity, so `time_of_day` is
+  never routed through the LIF network -- it only drives
+  `frontend/index.html`'s real Three.js sun/moon directional lights
+  (color-temperature-shifted warm at sunrise/sunset, neutral at noon),
+  a real ground plane, and real cast shadows (`renderer.shadowMap`,
+  `PCFSoftShadowMap`) from the fly meshes -- the user's own "sombras"
+  request. Still narrow: the sun/moon arc is a simple sinusoidal
+  elevation, not a real solar-geometry model, and only the sun casts a
+  shadow (the moon is a dimmer, unshadowed fill light).
+- **Non-lethal, moving dangers**: two dangers (`DANGER_ORBIT_*`,
+  `DANGER_PATROL_*` in `server.py`) move through the same space the
+  flies and landmarks occupy, at radius/extent ~11 units -- outside the
+  landmarks' ~7.8-unit ring, inside the city's own nearest building ring
+  (15+) -- each following a real, deterministic motion pattern derived
+  from the same authoritative elapsed sim time the clock reads (one
+  circles a fixed center at a fixed radius/period, the other walks a
+  straight line back and forth between two fixed points), never a fixed
+  point and never RNG-teleported ("estacionarios, tienen que tener
+  patrones de movimientos" -- real user requirement). A danger's entire
+  effect on a fly is two purely MECHANICAL things, both already-
+  established patterns in this file applied to a new source, neither a
+  new sensory/aversive channel: a repulsive steering bias (the mirror
+  image of a landmark's own attraction, `_DANGER_STEER_GAIN`) and a
+  direct motor-pathway arousal boost (`_DANGER_MOTOR_BOOST`, the real
+  mechanism behind "necesiten volar" -- measured directly: at
+  mood_level=1, a nearby danger raises motor_mask's spike fraction from
+  ~0.487 to ~0.547, above the existing flying-threshold ceiling). See
+  "No fear stimulus, ever" immediately below for the hard invariant this
+  respects without exception, and "Dangers can't be lethal" for what
+  "non-lethal" means concretely. Still narrow: exactly 2 dangers, both
+  with a fixed, simple motion shape -- no pursuit/hunting behavior, and
+  no other kind of hazard yet.
 - **No fear stimulus, ever**: `class == "gustatory"`, `sub_class ==
   "bitter"` (65 neurons) is the real aversive analog of the fabricated
   `OLF_ORN_DANGER` above -- it exists in the real data and could be
@@ -649,7 +726,24 @@ leaves out, honestly, follows each.
   instead of an invented one. The new conspecific-proximity boost above
   is, and must stay, a neutral "notices a peer" signal: nothing about
   another fly's presence ever lowers `mood_level`, adds an aversive
-  drive, or affects anything negatively.
+  drive, or affects anything negatively. The dangers above extend this
+  same commitment, not an exception to it: a danger's effect is always
+  framed as mechanical (steering/arousal, see "Non-lethal, moving
+  dangers" above), never as sensing or feeling a threat -- it never reads
+  `net.salt_mask`'s bitter sibling, never lowers `mood_level`, and is
+  never described to a viewer (narrator caption included, see
+  `frontend/index.html`'s own `narrateComputeSituation` comment) in
+  threatening or alarmed language.
+  - **Dangers can't be lethal**: there is no notion of "catching" a fly
+    anywhere in this codebase, at any distance. Nothing removes a fly
+    from the `World`; nothing zeros or caps `mood_level` or any other
+    field because a danger got close. A danger can sit exactly on top of
+    a fly indefinitely and the only effects are the two listed above,
+    both reversible and continuous every tick, never a one-time
+    punishment or a permanent loss of any kind ("no pueden ser letales"
+    -- real user requirement, in direct answer to whether "more dangers"
+    would conflict with the no-fear-stimulus commitment above: real risk/
+    cost is fine, permanent death or removal is not).
 
 `solomonsealed/flybrain` (already vendored here as the connectome data
 source) has already built almost exactly this world -- a walled orchard
@@ -667,14 +761,16 @@ sweep, see `server.py`'s `_FOOD_BOOST` comment) next to the boost's own
 effect, so the two are in fact distinguishable in the real data.
 
 Since then: real position and chemotaxis toward a single food landmark,
-then a second (water) landmark reusing the same one real channel, and
-then a shared multi-fly world with real (if neutral, non-steering)
-conspecific sensing -- see the five bullets above for what each of those
-actually does and doesn't cover. Still genuinely open: no obstacles or
-collision anywhere, no world boundary at all, only one real sensory
-channel behind both landmarks, a fixed 3-fly population with no breeding
-and no real "meeting" behavior beyond proximity -- and the fear channel
-stays unwired regardless.
+then a second (water) landmark reusing the same one real channel, then a
+shared multi-fly world with real (if neutral, non-steering) conspecific
+sensing, then a third, genuinely separate real taste (salt), a real
+day/night cycle with real cast shadows, and two non-lethal, continuously-
+moving dangers -- see the bullets above for what each of those actually
+does and doesn't cover. Still genuinely open: no obstacles or collision
+anywhere (beyond fly-fly separation), no world boundary at all, a fixed
+3-fly population with no breeding and no real "meeting" behavior beyond
+proximity, exactly 2 dangers with simple fixed motion shapes and no
+pursuit behavior -- and the fear/bitter channel stays unwired regardless.
 
 ## The flybody mesh
 

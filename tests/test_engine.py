@@ -17,6 +17,7 @@ from engine.network import (
 from engine.server import (
     FOOD_POSITION,
     N_FLIES,
+    SALT_POSITION,
     Simulation,
     WATER_POSITION,
     World,
@@ -507,7 +508,29 @@ def test_flies_end_up_near_each_other_without_fly_to_fly_steering():
     multi-body conflicts (see the comment above): seeds [10,11,12] now
     measure min_pairwise_ever as low as ~1.42 (was comfortably >1.45
     pre-depletion), so the tolerance below is widened from 0.05 to 0.15
-    to match this real, re-measured behavior -- not loosened blindly."""
+    to match this real, re-measured behavior -- not loosened blindly.
+
+    Re-measured again after the non-lethal dangers landed (see server.py's
+    DANGER_ORBIT_*/DANGER_PATROL_*/_DANGER_STEER_GAIN): a World now always
+    has 2 real dangers moving through the same space the landmarks sit
+    in, and DANGER_ORBIT's own ~11-unit-radius orbit periodically swings
+    within _DANGER_RANGE of FOOD_POSITION/WATER_POSITION/SALT_POSITION
+    (all ~7.8 units from the origin DANGER_ORBIT circles), which can
+    genuinely steer a fly away from a landmark it would otherwise be
+    parked on for a stretch of the run -- this is the dangers feature
+    actually working as designed (real repulsion pressure), not a test
+    artifact. Measured directly (same 3-seed-set/2500-tick methodology):
+    min_landmark_dist_after_500 across all 9 (seed, fly) combinations now
+    ranges ~0.012-1.341 (was ~0.004-<1.0 before dangers existed) -- one
+    real outlier (seed [0,1,2], fly 0, 1.341) against an otherwise tight
+    cluster under ~0.5, consistent with "usually settles close, sometimes
+    actively chased off for a while." The per-fly bound below is widened
+    from 1.0 to 1.5 (still well under _SOCIAL_RANGE/_FOOD_RANGE, so
+    "genuinely close to a landmark at some point" remains a real,
+    meaningful claim, not a vacuous one) to cover this real measured
+    range; SALT_POSITION is also checked now alongside FOOD_POSITION/
+    WATER_POSITION, since a fly settling at the third landmark instead
+    counts as "near a landmark" exactly as much as the other two do."""
     seed_sets = ([0, 1, 2], [10, 11, 12], [20, 21, 22])
     n_ticks = 2500
     for seeds in seed_sets:
@@ -530,7 +553,8 @@ def test_flies_end_up_near_each_other_without_fly_to_fly_steering():
                 for i, pos in enumerate(positions):
                     df = math.hypot(pos["x"] - FOOD_POSITION[0], pos["z"] - FOOD_POSITION[1])
                     dw = math.hypot(pos["x"] - WATER_POSITION[0], pos["z"] - WATER_POSITION[1])
-                    min_landmark_dist_after_500[i] = min(min_landmark_dist_after_500[i], df, dw)
+                    ds = math.hypot(pos["x"] - SALT_POSITION[0], pos["z"] - SALT_POSITION[1])
+                    min_landmark_dist_after_500[i] = min(min_landmark_dist_after_500[i], df, dw, ds)
         # basic physics: the collision response holds for the ENTIRE run,
         # including the coincident-at-spawn opening tick -- a small
         # tolerance (not an exact ">=") only for float/multi-body-conflict
@@ -548,9 +572,11 @@ def test_flies_end_up_near_each_other_without_fly_to_fly_steering():
         assert max_pairwise_ever > 1.0, (seeds, max_pairwise_ever)
         # ...and separately, the underlying "drawn to shared landmarks"
         # behavior the collision response must not defeat: every fly,
-        # individually, still gets genuinely close to a landmark.
+        # individually, still gets genuinely close to a landmark at some
+        # point -- widened from 1.0 to 1.5 after dangers landed, see this
+        # test's own docstring for the real re-measured numbers.
         for i, d in enumerate(min_landmark_dist_after_500):
-            assert d < 1.0, (seeds, i, d)
+            assert d < 1.5, (seeds, i, d)
 
 
 # --- Food/water supply: depletion + respawn (World._advance_supply) -------

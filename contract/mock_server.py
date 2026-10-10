@@ -81,7 +81,10 @@ def _build_mock_graph() -> dict:
 _MOCK_GRAPH = _build_mock_graph()
 
 
-def _mock_tick(tick: int, sim_time_ms: float, mood_level: float) -> dict:
+_DEFAULT_MOCK_CYCLE_LENGTH_S = 3600.0
+
+
+def _mock_tick(tick: int, sim_time_ms: float, mood_level: float, cycle_length_s: float) -> dict:
     t = sim_time_ms / 1000.0
     active_regions = [
         {"region": region, "activity": (math.sin(t * 0.7 + i) + 1) / 2}
@@ -113,6 +116,16 @@ def _mock_tick(tick: int, sim_time_ms: float, mood_level: float) -> dict:
     _WATER_SUPPLY_PERIOD_S = 27.0
     food_supply = 1.0 - (t % _FOOD_SUPPLY_PERIOD_S) / _FOOD_SUPPLY_PERIOD_S
     water_supply = 1.0 - ((t + _WATER_SUPPLY_PERIOD_S / 2.0) % _WATER_SUPPLY_PERIOD_S) / _WATER_SUPPLY_PERIOD_S
+    # plausible stand-in for the real engine's activity.salt_activity/
+    # salt_supply (schema "1.7" -- see server.py's net.salt_mask/
+    # World.salt_supply). salt_activity oscillates in roughly the real
+    # measured ~0.30-0.44 range (see server.py's _SALT_BOOST comment);
+    # salt_supply reuses the exact same synthetic sawtooth shape as food/
+    # water_supply above, its own period/phase so all three deplete and
+    # respawn independently in this mock.
+    _SALT_SUPPLY_PERIOD_S = 23.0
+    salt_activity = 0.30 + 0.14 * ((math.sin(t * 0.3 + 5.5) + 1) / 2)
+    salt_supply = 1.0 - ((t + _SALT_SUPPLY_PERIOD_S / 3.0) % _SALT_SUPPLY_PERIOD_S) / _SALT_SUPPLY_PERIOD_S
     # plausible stand-in for the real engine's activity.sample_spikes (see
     # server.py's Simulation.step()) -- the mock has no LIF network or
     # real sample to look real spikes up in, so this just draws a handful
@@ -154,8 +167,33 @@ def _mock_tick(tick: int, sim_time_ms: float, mood_level: float) -> dict:
             "wing_state": "raised" if other_fly_2_action == "flying" else "folded",
         },
     ]
+    # plausible stand-in for World.clock_state()/World.danger_positions()
+    # (schema "1.7" -- see server.py's _DEFAULT_CYCLE_LENGTH_S/
+    # DANGER_ORBIT_*/DANGER_PATROL_*). time_of_day derives from this
+    # mock's own elapsed sim time the same way the real World does
+    # (fraction of cycle_length_s, which the mock does let a client adjust
+    # via "set_cycle_length_s" -- see _handle_client below); dangers reuse
+    # the real engine's own orbit/patrol shapes and constants so a
+    # frontend built against this mock sees the same two movement
+    # patterns before ever touching the real engine.
+    clock = {"time_of_day": (t / cycle_length_s) % 1.0, "cycle_length_s": cycle_length_s}
+    _DANGER_ORBIT_RADIUS, _DANGER_ORBIT_PERIOD_S = 11.0, 40.0
+    _DANGER_PATROL_AX, _DANGER_PATROL_BX, _DANGER_PATROL_Z, _DANGER_PATROL_PERIOD_S = -11.0, 11.0, 11.0, 30.0
+    orbit_angle = 2.0 * math.pi * (t % _DANGER_ORBIT_PERIOD_S) / _DANGER_ORBIT_PERIOD_S
+    patrol_frac = (t % _DANGER_PATROL_PERIOD_S) / _DANGER_PATROL_PERIOD_S
+    patrol_t = 1.0 - abs(2.0 * patrol_frac - 1.0)
+    dangers = [
+        {"id": 0, "position": {
+            "x": _DANGER_ORBIT_RADIUS * math.sin(orbit_angle),
+            "z": _DANGER_ORBIT_RADIUS * math.cos(orbit_angle),
+        }},
+        {"id": 1, "position": {
+            "x": _DANGER_PATROL_AX + (_DANGER_PATROL_BX - _DANGER_PATROL_AX) * patrol_t,
+            "z": _DANGER_PATROL_Z,
+        }},
+    ]
     return {
-        "schema_version": "1.6",
+        "schema_version": "1.7",
         "tick": tick,
         "sim_time_ms": sim_time_ms,
         "stimulus": {"mood_level": mood_level, "other_inputs": {}},
@@ -166,6 +204,8 @@ def _mock_tick(tick: int, sim_time_ms: float, mood_level: float) -> dict:
             "food_activity": food_activity,
             "food_supply": food_supply,
             "water_supply": water_supply,
+            "salt_activity": salt_activity,
+            "salt_supply": salt_supply,
             "sample_spikes": sample_spikes,
         },
         "motor_state": {
@@ -176,7 +216,7 @@ def _mock_tick(tick: int, sim_time_ms: float, mood_level: float) -> dict:
             "position": position,
         },
         "meta": {"status": "running", "notes": "mock stream"},
-        "world": {"other_flies": other_flies},
+        "world": {"other_flies": other_flies, "clock": clock, "dangers": dangers},
     }
 
 
@@ -190,9 +230,10 @@ async def _handle_client(ws: ServerConnection) -> None:
     tick = 0
     sim_time_ms = 0.0
     mood_level = 0.0
+    cycle_length_s = _DEFAULT_MOCK_CYCLE_LENGTH_S
 
     async def read_controls():
-        nonlocal mood_level
+        nonlocal mood_level, cycle_length_s
         async for raw in ws:
             try:
                 message = json.loads(raw)
@@ -200,6 +241,10 @@ async def _handle_client(ws: ServerConnection) -> None:
                     mood_level = max(0.0, min(1.0, float(message["value"])))
                 elif message.get("type") == "set_mood_mode" and message.get("value") == "auto":
                     pass  # the mock never auto-ramps; nothing to release to
+                elif message.get("type") == "set_cycle_length_s":
+                    # same clamp range as the real World.handle_control --
+                    # see server.py's _MIN/_MAX_CYCLE_LENGTH_S.
+                    cycle_length_s = max(60.0, min(24.0 * 3600.0, float(message["value"])))
             except (json.JSONDecodeError, KeyError, ValueError, TypeError):
                 pass
 
@@ -208,7 +253,7 @@ async def _handle_client(ws: ServerConnection) -> None:
         while True:
             tick += 1
             sim_time_ms += DT_MS
-            payload = _mock_tick(tick, sim_time_ms, mood_level)
+            payload = _mock_tick(tick, sim_time_ms, mood_level, cycle_length_s)
             validate_tick(payload)
             await ws.send(json.dumps(payload))
             await asyncio.sleep(DT_MS / 1000.0)

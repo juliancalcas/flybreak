@@ -6,7 +6,7 @@
   "required": ["schema_version", "tick", "sim_time_ms", "stimulus", "activity", "motor_state", "meta", "world"],
   "additionalProperties": false,
   "properties": {
-    "schema_version": { "const": "1.6" },
+    "schema_version": { "const": "1.7" },
     "tick": { "type": "integer", "minimum": 0 },
     "sim_time_ms": { "type": "number", "minimum": 0 },
     "stimulus": {
@@ -20,7 +20,7 @@
     },
     "activity": {
       "type": "object",
-      "required": ["spike_count", "firing_rate_hz", "active_regions", "food_activity", "food_supply", "water_supply", "sample_spikes"],
+      "required": ["spike_count", "firing_rate_hz", "active_regions", "food_activity", "food_supply", "water_supply", "salt_activity", "salt_supply", "sample_spikes"],
       "additionalProperties": false,
       "properties": {
         "spike_count": { "type": "integer", "minimum": 0 },
@@ -40,6 +40,8 @@
         "food_activity": { "type": "number", "minimum": 0, "maximum": 1 },
         "food_supply": { "type": "number", "minimum": 0, "maximum": 1 },
         "water_supply": { "type": "number", "minimum": 0, "maximum": 1 },
+        "salt_activity": { "type": "number", "minimum": 0, "maximum": 1 },
+        "salt_supply": { "type": "number", "minimum": 0, "maximum": 1 },
         "sample_spikes": {
           "type": "array",
           "items": { "type": "integer", "minimum": 0 }
@@ -77,9 +79,38 @@
     },
     "world": {
       "type": "object",
-      "required": ["other_flies"],
+      "required": ["other_flies", "clock", "dangers"],
       "additionalProperties": false,
       "properties": {
+        "clock": {
+          "type": "object",
+          "required": ["time_of_day", "cycle_length_s"],
+          "additionalProperties": false,
+          "properties": {
+            "time_of_day": { "type": "number", "minimum": 0, "maximum": 1 },
+            "cycle_length_s": { "type": "number", "exclusiveMinimum": 0 }
+          }
+        },
+        "dangers": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "position"],
+            "additionalProperties": false,
+            "properties": {
+              "id": { "type": "integer", "minimum": 0 },
+              "position": {
+                "type": "object",
+                "required": ["x", "z"],
+                "additionalProperties": false,
+                "properties": {
+                  "x": { "type": "number" },
+                  "z": { "type": "number" }
+                }
+              }
+            }
+          }
+        },
         "other_flies": {
           "type": "array",
           "items": {

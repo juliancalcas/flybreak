@@ -65,6 +65,27 @@ MOTOR_SUPER_CLASSES = frozenset({"motor", "descending"})
 FOOD_CLASS = "gustatory"
 FOOD_SUB_CLASS = "sugar/water"
 
+# A second, genuinely SEPARATE real appetitive taste channel -- unlike
+# WATER_POSITION (server.py), which deliberately reuses FOOD_CLASS/
+# FOOD_SUB_CLASS because FlyWire's data has no separate water-identified
+# population, `sub_class == "low-salt"` (19 neurons, same `class ==
+# "gustatory"` as FOOD_SUB_CLASS) IS its own real, distinct,
+# identity-labeled population -- checked directly against
+# classification.csv.gz's real value_counts for `class == "gustatory"`
+# (`'sugar/water' 129, 'bitter' 65, 'low-salt' 19`, among several other
+# real but narrower/unlabeled-enough-to-skip sub_classes -- `taste_peg`,
+# `SA_VTV_pro_meso_meta`, the `*_pharyngeal_nerve_*` groups -- none of
+# which carry a clear appetitive/aversive identity the way sugar/water,
+# bitter, and low-salt do). Reusing FOOD_MASK for this would repeat the
+# exact mistake WATER_POSITION's own comment explains NOT making when a
+# real, separately-labeled population already exists. 19 neurons is small
+# (smaller than ellipsoid_body's 355 or antennal_lobe's 2,762) but real --
+# this project already treats small real populations as legitimate
+# wherever they're genuinely, distinctly labeled (see "The real
+# connectome" in README.md), not padded for size.
+SALT_CLASS = "gustatory"
+SALT_SUB_CLASS = "low-salt"
+
 # The real analog of "another fly is visibly nearby" (see server.py's
 # World/_SOCIAL_RANGE -- Part 2 of "multiple flies", README.md's "Where
 # this is headed"). FlyWire's own `super_class` values `optic` (the
@@ -209,6 +230,7 @@ class _Connectome:
     region_masks: dict             # region -> (n,) bool mask, precomputed once (super_class- and group-derived)
     motor_mask: np.ndarray         # (n,) bool, region_of in MOTOR_SUPER_CLASSES
     food_mask: np.ndarray          # (n,) bool, class==FOOD_CLASS & sub_class==FOOD_SUB_CLASS
+    salt_mask: np.ndarray          # (n,) bool, class==SALT_CLASS & sub_class==SALT_SUB_CLASS
     visual_mask: np.ndarray        # (n,) bool, region_of in VISUAL_SUPER_CLASSES
     w: sparse.csr_matrix           # (n, n), w[post, pre] = signed synapse weight
 
@@ -278,6 +300,7 @@ def _load_connectome() -> _Connectome:
     region_masks = {r: (region_of == r) for r in regions}
     motor_mask = np.isin(region_of, list(MOTOR_SUPER_CLASSES))
     food_mask = (class_of == FOOD_CLASS) & (sub_class_of == FOOD_SUB_CLASS)
+    salt_mask = (class_of == SALT_CLASS) & (sub_class_of == SALT_SUB_CLASS)
     visual_mask = np.isin(region_of, list(VISUAL_SUPER_CLASSES))
 
     # neurons.csv join: its root_id column is 100% overlapping with
@@ -347,7 +370,8 @@ def _load_connectome() -> _Connectome:
 
     return _Connectome(n=n, region_of=region_of, group_of=group_of, regions=regions,
                         region_masks=region_masks, motor_mask=motor_mask,
-                        food_mask=food_mask, visual_mask=visual_mask, w=w)
+                        food_mask=food_mask, salt_mask=salt_mask,
+                        visual_mask=visual_mask, w=w)
 
 
 class LIFNetwork:
@@ -370,6 +394,7 @@ class LIFNetwork:
         self._region_masks = connectome.region_masks
         self.motor_mask = connectome.motor_mask
         self.food_mask = connectome.food_mask
+        self.salt_mask = connectome.salt_mask
         self.visual_mask = connectome.visual_mask
         self.w = connectome.w
 

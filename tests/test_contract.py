@@ -4,7 +4,7 @@ import pytest
 from contract.validator import is_valid_graph, is_valid_tick, validate_graph, validate_tick
 
 VALID_TICK = {
-    "schema_version": "1.6",
+    "schema_version": "1.7",
     "tick": 4821,
     "sim_time_ms": 300,
     "stimulus": {"mood_level": 0.72, "other_inputs": {}},
@@ -19,6 +19,8 @@ VALID_TICK = {
         "food_activity": 0.63,
         "food_supply": 0.81,
         "water_supply": 0.47,
+        "salt_activity": 0.35,
+        "salt_supply": 0.92,
         "sample_spikes": [3, 17, 42],
     },
     "motor_state": {
@@ -27,6 +29,11 @@ VALID_TICK = {
     },
     "meta": {"status": "decompressing", "notes": ""},
     "world": {
+        "clock": {"time_of_day": 0.42, "cycle_length_s": 3600.0},
+        "dangers": [
+            {"id": 0, "position": {"x": 2.1, "z": 9.4}},
+            {"id": 1, "position": {"x": -5.0, "z": 11.0}},
+        ],
         "other_flies": [
             {"id": 1, "position": {"x": -1.2, "z": 4.5}, "heading_deg": 42, "action": "idle", "wing_state": "folded"},
             {"id": 2, "position": {"x": 5.0, "z": -2.3}, "heading_deg": 301, "action": "flying", "wing_state": "buzzing"},
@@ -82,6 +89,66 @@ def test_water_supply_out_of_range_rejected():
 def test_water_supply_missing_rejected():
     activity = {k: v for k, v in VALID_TICK["activity"].items() if k != "water_supply"}
     tick = {**VALID_TICK, "activity": activity}
+    assert not is_valid_tick(tick)
+
+
+def test_salt_activity_out_of_range_rejected():
+    tick = {**VALID_TICK, "activity": {**VALID_TICK["activity"], "salt_activity": 1.2}}
+    assert not is_valid_tick(tick)
+
+
+def test_salt_activity_missing_rejected():
+    activity = {k: v for k, v in VALID_TICK["activity"].items() if k != "salt_activity"}
+    tick = {**VALID_TICK, "activity": activity}
+    assert not is_valid_tick(tick)
+
+
+def test_salt_supply_out_of_range_rejected():
+    tick = {**VALID_TICK, "activity": {**VALID_TICK["activity"], "salt_supply": -0.1}}
+    assert not is_valid_tick(tick)
+
+
+def test_salt_supply_missing_rejected():
+    activity = {k: v for k, v in VALID_TICK["activity"].items() if k != "salt_supply"}
+    tick = {**VALID_TICK, "activity": activity}
+    assert not is_valid_tick(tick)
+
+
+def test_clock_missing_rejected():
+    world = {k: v for k, v in VALID_TICK["world"].items() if k != "clock"}
+    tick = {**VALID_TICK, "world": world}
+    assert not is_valid_tick(tick)
+
+
+def test_clock_time_of_day_out_of_range_rejected():
+    world = {**VALID_TICK["world"], "clock": {"time_of_day": 1.5, "cycle_length_s": 3600.0}}
+    tick = {**VALID_TICK, "world": world}
+    assert not is_valid_tick(tick)
+
+
+def test_clock_cycle_length_zero_rejected():
+    world = {**VALID_TICK["world"], "clock": {"time_of_day": 0.5, "cycle_length_s": 0.0}}
+    tick = {**VALID_TICK, "world": world}
+    assert not is_valid_tick(tick)
+
+
+def test_dangers_missing_rejected():
+    world = {k: v for k, v in VALID_TICK["world"].items() if k != "dangers"}
+    tick = {**VALID_TICK, "world": world}
+    assert not is_valid_tick(tick)
+
+
+def test_dangers_empty_array_accepted():
+    """No dangers (e.g. a bare standalone Simulation) is still valid --
+    see server.py's Simulation.step(), which sends an empty list."""
+    world = {**VALID_TICK["world"], "dangers": []}
+    tick = {**VALID_TICK, "world": world}
+    assert is_valid_tick(tick)
+
+
+def test_danger_missing_position_rejected():
+    world = {**VALID_TICK["world"], "dangers": [{"id": 0}]}
+    tick = {**VALID_TICK, "world": world}
     assert not is_valid_tick(tick)
 
 

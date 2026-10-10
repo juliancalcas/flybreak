@@ -21,7 +21,7 @@ from contract.validator import validate_graph, validate_tick
 from engine.mood import MoodController
 from engine.network import LIFNetwork, get_sample_graph, warm_cache
 
-SCHEMA_VERSION = "1.6"
+SCHEMA_VERSION = "1.7"
 TICK_HZ = 20
 DT_MS = 1000.0 / TICK_HZ
 
@@ -141,6 +141,19 @@ FOOD_POSITION = (6.0, 5.0)  # (x, z)
 # frontend/index.html's nearest ring of wireframe buildings (radius 15+).
 WATER_POSITION = (-6.0, -5.0)  # (x, z)
 
+# SALT_POSITION: a THIRD landmark, but unlike WATER_POSITION this one
+# drives a genuinely SEPARATE real channel -- net.salt_mask (`class ==
+# "gustatory"`, `sub_class == "low-salt"`, 19 real neurons -- see
+# network.py's SALT_CLASS/SALT_SUB_CLASS comment for why this one, unlike
+# water, gets its own mask instead of reusing FOOD_MASK: the real data
+# separately labels it, so reusing food_mask here would repeat exactly
+# the mistake WATER_POSITION's own comment explains avoiding). Placed at
+# the same ~7.8-unit radius from spawn as FOOD_POSITION/WATER_POSITION
+# (sqrt((-6)^2 + 5^2) = 7.81), in the one remaining quadrant (-x, +z) so
+# all three landmarks are visually distinct and equidistant from spawn --
+# no landmark starts favored over another.
+SALT_POSITION = (-6.0, 5.0)  # (x, z)
+
 # _FOOD_BOOST is now the boost's FULL strength, only reached at/very near
 # FOOD_POSITION -- see the proximity scaling below. Real gustatory
 # (taste) sensing in the actual fly is contact-based, not a distance
@@ -187,6 +200,27 @@ WATER_POSITION = (-6.0, -5.0)  # (x, z)
 _FOOD_BOOST = 2.0
 _FOOD_RANGE = 8.0
 _FOOD_EMA_ALPHA = 0.1
+
+# SALT_POSITION drives net.salt_mask (19 real neurons -- see its own
+# comment) through the SAME boost magnitude and falloff shape as
+# FOOD_BOOST/_FOOD_RANGE -- same "contact taste ramped by proximity"
+# simplification, same reasoning for the specific numbers (see
+# _FOOD_BOOST's own comment above; nothing about that reasoning is
+# food-specific). Measured separately, not assumed: this is a much
+# smaller real population (19 vs. food_mask's 129), so it was checked
+# directly rather than presumed to behave identically -- same methodology
+# as _FOOD_BOOST's own calibration (60-tick runs, seed 0, first 10 ticks
+# dropped, LIFNetwork driven directly at a fixed boost, mood_level=0):
+# salt_mask's per-tick spike fraction is ~0.30-0.31 at boost=0 (seeds
+# 0-2), rising to ~0.43-0.44 at the same boost=2.0 _FOOD_BOOST uses --
+# smaller absolute swing than food_mask's ~0.21-0.56 (expected: a
+# 19-neuron population's mean has visibly more tick-to-tick sampling
+# noise than a 129-neuron one, which is also why _SALT_EMA_ALPHA matters
+# here, same smoothing role as _FOOD_EMA_ALPHA), but real, monotonic, and
+# consistent across seeds -- not a no-op.
+_SALT_BOOST = 2.0
+_SALT_RANGE = 8.0
+_SALT_EMA_ALPHA = 0.1
 
 # Advances (self._x, self._z) each tick exactly the way the frontend's
 # own client-side dead reckoning always has (frontend/index.html's
@@ -394,6 +428,145 @@ def _spawn_offset(index: int, n_flies: int) -> tuple[float, float]:
     return (_SPAWN_RADIUS * math.sin(angle), _SPAWN_RADIUS * math.cos(angle))
 
 
+# ---- Day/night cycle (see README.md, "Where this is headed" -- "A
+# day/night cycle"). This is a World-level SIMULATION/RENDERING variable
+# -- what the sun's real position and the ambient light level are, used
+# by the frontend to drive a real Three.js directional light (and real
+# cast shadows) -- NOT a claim about fly circadian neurobiology. Checked
+# directly against classification.csv.gz/neurons.csv.gz the same way
+# FOOD_CLASS/SALT_CLASS were: nothing in `class`, `sub_class`, or `group`
+# is labeled as a clock/circadian population at any granularity, so there
+# is no real, identity-labeled neuron population this could honestly
+# drive the way FOOD_POSITION drives net.food_mask. It is therefore never
+# routed through the LIF network at all -- same "explicit design choice,
+# not a biological claim" spirit as mood_level's own motor_threshold_scale
+# (see Simulation.step()'s comment), just with zero neural effect rather
+# than a deliberately-chosen one.
+#
+# `time_of_day` is a continuous fraction of one full cycle, derived (not
+# separately counted) from the World's own already-authoritative elapsed
+# sim time (fly 0's sim_time_ms, which every fly in a World shares in
+# lockstep -- see World.step()'s two-pass comment): 0.0 = midnight,
+# 0.25 = sunrise, 0.5 = noon, 0.75 = sunset, wrapping back to 0.0/1.0.
+#
+# `cycle_length_s` is how many REAL seconds one full lap takes --
+# _DEFAULT_CYCLE_LENGTH_S=3600 (one real hour) matches the user's own
+# request literally ("en vez de 24 horas es una hora" -- a full simulated
+# day compressed into one real hour, not 24) -- and is user-adjustable at
+# runtime (World.handle_control's "set_cycle_length_s"), clamped to
+# [_MIN_CYCLE_LENGTH_S, _MAX_CYCLE_LENGTH_S] so a client can't set it to
+# ~0 (a divide-towards-infinitely-fast flicker) or negative.
+# _MAX_CYCLE_LENGTH_S is the real, uncompressed 24h -- the slowest sane
+# setting, i.e. "turn the compression off entirely" rather than something
+# arbitrarily larger.
+_DEFAULT_CYCLE_LENGTH_S = 3600.0
+_MIN_CYCLE_LENGTH_S = 60.0
+_MAX_CYCLE_LENGTH_S = 24.0 * 3600.0
+
+
+# ---- Non-lethal, continuously-moving "dangers" (see README.md's "No
+# fear stimulus, ever" -- the hard invariant this must respect without
+# exception: `net.salt_mask`/`net.food_mask`'s real aversive sibling,
+# `class == "gustatory"`, `sub_class == "bitter"` (65 neurons), stays
+# deliberately UNREAD and UNWIRED here, exactly as it already is
+# everywhere else in this codebase. A danger's entire effect on a fly is
+# two purely MECHANICAL things, both already-established patterns in this
+# file applied to a new source, neither one a new sensory/aversive
+# channel: (1) a repulsive steering bias, the mirror image of
+# FOOD_POSITION's own attraction (_DANGER_STEER_GAIN), and (2) a direct
+# motor-pathway arousal boost (_DANGER_MOTOR_BOOST, same kind of explicit,
+# labeled design choice as mood_level's motor_threshold_scale -- not a
+# claim about a specific real fear/startle circuit this dataset has no
+# identity-labeled population for). Never lowers mood_level, never reads
+# the bitter sub_class, never represented as a "threat" in any text this
+# codebase sends a client (same standard the narrator caption already
+# holds itself to for a depleted landmark or another fly's presence --
+# frontend/index.html's own narrateComputeSituation comment).
+#
+# NOT lethal: there is no notion of "catching" a fly anywhere in this
+# code, at any distance -- nothing removes a fly from the World, nothing
+# zeros or caps its mood_level or any other field. A danger can sit
+# exactly on top of a fly indefinitely and the only effects are the two
+# listed above, both reversible and continuous, never a one-time
+# punishment.
+#
+# NOT stationary: each danger follows a real, deterministic motion
+# pattern (see _orbit_position/_patrol_position below), driven by the
+# same already-authoritative elapsed sim time the day/night cycle reads
+# above -- not a fixed point, and not RNG-teleported (same "determinism
+# where it's free" style already used throughout this file, e.g.
+# _spawn_offset/_apply_min_separation's coincidence fallback).
+#
+# Two dangers, two distinct real movement patterns (variety, and so
+# "patrones de movimientos" -- real user requirement -- is plural and
+# genuinely different per danger, not one shape copy-pasted twice):
+# DANGER_ORBIT circles a fixed center at a fixed radius/period;
+# DANGER_PATROL walks a straight line back and forth between two fixed
+# points. Both placed at radius/extent ~11 units -- outside
+# FOOD_POSITION/WATER_POSITION/SALT_POSITION's own ~7.8-unit ring (so a
+# danger never sits on top of a landmark) and inside the wireframe city's
+# own nearest building ring (radius 15+, frontend/index.html) -- a
+# distinct, visible band of space between "where the flies feed" and
+# "the edge of the world."
+DANGER_ORBIT_CENTER = (0.0, 0.0)
+DANGER_ORBIT_RADIUS = 11.0
+DANGER_ORBIT_PERIOD_S = 40.0  # real seconds per full lap
+
+DANGER_PATROL_A = (-11.0, 11.0)
+DANGER_PATROL_B = (11.0, 11.0)
+DANGER_PATROL_PERIOD_S = 30.0  # real seconds for one full A->B->A lap
+
+# _DANGER_RANGE: same exponential-falloff shape as _FOOD_RANGE/
+# _SOCIAL_RANGE (proximity = exp(-distance/_DANGER_RANGE)), sized between
+# _SOCIAL_RANGE (5.0, "notice a conspecific") and _FOOD_RANGE (8.0, "smell
+# a landmark across the world") -- a moving danger is meant to be noticed
+# from further than a peer but not quite as far as an always-there,
+# deliberately-sensed landmark.
+#
+# _DANGER_MOTOR_BOOST=0.6 (same magnitude as _SOCIAL_BOOST, deliberately
+# -- both are "arousal, not sensing" boosts, just applied to different
+# masks: _SOCIAL_BOOST goes to visual_mask, "notice more"; this goes
+# directly to motor_mask, "move more/faster/fly," the literal mechanism
+# behind "necesiten volar" -- real user requirement). Measured, not
+# assumed (same methodology as _SOCIAL_BOOST's own calibration: 60-tick
+# runs, seed 0, first 10 ticks dropped, LIFNetwork driven directly,
+# motor_mask boosted at a fixed magnitude): at mood_level=1 (today's real
+# best-case, see _MOTOR_ACTIVITY_MAX's own comment), boost=0 measures
+# motor_mask spike fraction ~0.487 (consistent with the ~0.495-0.512 real
+# World best case already on record); boost=0.6 raises that to ~0.547 --
+# ABOVE the existing _MOTOR_ACTIVITY_MAX=0.51 ceiling, i.e. genuinely
+# enough to push a contented fly past the "flying" threshold once the EMA
+# catches up, not a token nudge. At mood_level=0 (worst case), boost=0.6
+# only raises ~0.362 to ~0.383 -- still well under _MOTOR_ACTIVITY_MIN's
+# own 0.36-ish floor-adjacent range, i.e. a miserable fly near a danger
+# does not suddenly fly either; the effect is real but mood-gated, not a
+# guaranteed override. _DANGER_STEER_GAIN=0.5 (vs. _FOOD_STEER_GAIN=0.35)
+# is deliberately a bit stronger -- avoidance is meant to read as more
+# urgent than casual attraction -- same exponential-proximity gating
+# shape, just pushing away from the nearest danger instead of toward a
+# landmark.
+_DANGER_RANGE = 6.0
+_DANGER_MOTOR_BOOST = 0.6
+_DANGER_STEER_GAIN = 0.5
+
+
+def _orbit_position(elapsed_s: float) -> tuple[float, float]:
+    angle = 2.0 * math.pi * (elapsed_s % DANGER_ORBIT_PERIOD_S) / DANGER_ORBIT_PERIOD_S
+    return (
+        DANGER_ORBIT_CENTER[0] + DANGER_ORBIT_RADIUS * math.sin(angle),
+        DANGER_ORBIT_CENTER[1] + DANGER_ORBIT_RADIUS * math.cos(angle),
+    )
+
+
+def _patrol_position(elapsed_s: float) -> tuple[float, float]:
+    frac = (elapsed_s % DANGER_PATROL_PERIOD_S) / DANGER_PATROL_PERIOD_S
+    t = 1.0 - abs(2.0 * frac - 1.0)  # triangle wave: 0 (at A) -> 1 (at B) -> 0 (at A)
+    return (
+        DANGER_PATROL_A[0] + (DANGER_PATROL_B[0] - DANGER_PATROL_A[0]) * t,
+        DANGER_PATROL_A[1] + (DANGER_PATROL_B[1] - DANGER_PATROL_A[1]) * t,
+    )
+
+
 class Simulation:
     def __init__(self, seed: int = 0, spawn: tuple[float, float] = (0.0, 0.0)):
         self.net = LIFNetwork(seed=seed)
@@ -414,6 +587,7 @@ class Simulation:
         self._x, self._z = spawn
         self._motor_ema = None
         self._food_ema = None
+        self._salt_ema = None
         self._rng = np.random.default_rng(seed)
         # local sample id -> real connectome neuron index, for
         # "sample_spikes" below -- see network.get_sample_graph's own
@@ -427,6 +601,8 @@ class Simulation:
         peer_positions: list[tuple[float, float]] | None = None,
         food_supply: float = 1.0,
         water_supply: float = 1.0,
+        salt_supply: float = 1.0,
+        danger_positions: list[tuple[float, float]] | None = None,
     ) -> dict:
         """Advances one tick.
 
@@ -439,15 +615,26 @@ class Simulation:
         this fly senses no peers -- Simulation remains independently
         constructible/steppable/testable exactly as before.
 
-        `food_supply`/`water_supply` are each landmark's current supply
-        fraction (1.0 = full, 0.0 = exhausted -- see World's
-        _EATING_RANGE/_SUPPLY_CONSUMPTION_PER_TICK/_SUPPLY_RESPAWN_TICKS
-        comment), used to scale that landmark's own proximity before it
-        drives net.food_mask. Both default to 1.0 (always full supply),
-        the same "standalone Simulation defaults to the no-op case"
-        spirit peer_positions already follows -- a bare Simulation with
-        no World around it has no shared landmark-depletion state to
-        read, so it behaves exactly as it always has.
+        `food_supply`/`water_supply`/`salt_supply` are each landmark's
+        current supply fraction (1.0 = full, 0.0 = exhausted -- see
+        World's _EATING_RANGE/_SUPPLY_CONSUMPTION_PER_TICK/
+        _SUPPLY_RESPAWN_TICKS comment), used to scale that landmark's own
+        proximity before it drives its real mask (food_supply/water_supply
+        both scale net.food_mask -- see WATER_POSITION's comment for why
+        they share it; salt_supply scales the separate net.salt_mask).
+        All three default to 1.0 (always full supply), the same
+        "standalone Simulation defaults to the no-op case" spirit
+        peer_positions already follows -- a bare Simulation with no World
+        around it has no shared landmark-depletion state to read, so it
+        behaves exactly as it always has.
+
+        `danger_positions` is an optional list of the World's current
+        danger (x, z) positions this tick (see DANGER_ORBIT_*/
+        DANGER_PATROL_*/_orbit_position/_patrol_position) -- used only for
+        the purely mechanical repulsion/motor-arousal effect described in
+        the dangers' own module comment above. None/empty (the default)
+        means no dangers exist this tick, same "standalone defaults to
+        the no-op case" spirit as everything else here.
         """
         self.mood.advance(DT_MS)
         mood_level = self.mood.level
@@ -473,6 +660,7 @@ class Simulation:
         # same position.
         food_distance = math.hypot(self._x - FOOD_POSITION[0], self._z - FOOD_POSITION[1])
         water_distance = math.hypot(self._x - WATER_POSITION[0], self._z - WATER_POSITION[1])
+        salt_distance = math.hypot(self._x - SALT_POSITION[0], self._z - SALT_POSITION[1])
         # Each landmark's raw distance-gradient proximity, scaled by its
         # own current supply fraction (see _EATING_RANGE's comment) -- a
         # depleted landmark (supply=0) contributes zero proximity here
@@ -486,6 +674,14 @@ class Simulation:
         # net.food_mask once the fly is already there.
         food_proximity = math.exp(-food_distance / _FOOD_RANGE) * food_supply
         water_proximity = math.exp(-water_distance / _FOOD_RANGE) * water_supply
+        # SALT_POSITION's own proximity, same shape/supply-gating as food/
+        # water but its own range constant (currently equal to _FOOD_RANGE,
+        # kept as its own named constant since it drives a genuinely
+        # separate real mask -- see _SALT_RANGE's comment) and its own
+        # supply fraction -- NOT folded into the food/water max() below,
+        # since net.salt_mask is a different real receptor population, not
+        # the same one food/water share.
+        salt_proximity = math.exp(-salt_distance / _SALT_RANGE) * salt_supply
         # max(), not summed -- see WATER_POSITION's comment. net.food_mask
         # is one real taste-receptor population; a real receptor
         # population saturates on whichever stimulus is currently
@@ -498,6 +694,7 @@ class Simulation:
         proximity = max(food_proximity, water_proximity)
         drive = self._rng.normal(0.15 + mood_level * 0.15, 0.1, size=self.net.n).astype(np.float32)
         drive[self.net.food_mask] += _FOOD_BOOST * proximity
+        drive[self.net.salt_mask] += _SALT_BOOST * salt_proximity
 
         # Conspecific ("another fly nearby") boost -- see _SOCIAL_BOOST/
         # _SOCIAL_RANGE's comment. Uses the nearest peer only (min, not
@@ -516,6 +713,23 @@ class Simulation:
         else:
             social_proximity = 0.0
         drive[self.net.visual_mask] += _SOCIAL_BOOST * social_proximity
+
+        # Danger proximity -- see the dangers' own module comment above
+        # for the "mechanical, not a new sensory channel" framing. Nearest
+        # danger only (min), same saturating logic as food/water/peer
+        # proximity above -- not summed across however many dangers exist.
+        # Boosts net.motor_mask DIRECTLY (not a separate mask/population --
+        # there is no real one to attach to honestly, see the module
+        # comment), the real mechanism behind "the fastest way to open
+        # distance is to fly."
+        if danger_positions:
+            nearest_danger_distance = min(
+                math.hypot(self._x - dx, self._z - dz) for dx, dz in danger_positions
+            )
+            danger_proximity = math.exp(-nearest_danger_distance / _DANGER_RANGE)
+        else:
+            danger_proximity = 0.0
+        drive[self.net.motor_mask] += _DANGER_MOTOR_BOOST * danger_proximity
 
         spikes = self.net.step(DT_MS, drive, motor_threshold_scale=motor_threshold_scale)
         self.tick += 1
@@ -564,6 +778,18 @@ class Simulation:
             self._food_ema += _FOOD_EMA_ALPHA * (food_activity_raw - self._food_ema)
         food_activity = float(np.clip(self._food_ema, 0.0, 1.0))
 
+        # net.salt_mask's own raw spike fraction, EMA-smoothed the same
+        # way and for the same reason as food_activity above -- a smaller
+        # real population (19 vs. 129 neurons, see _SALT_BOOST's comment)
+        # so the raw per-tick noise is proportionally larger, making the
+        # smoothing if anything more important here, not less.
+        salt_activity_raw = float(spikes[self.net.salt_mask].mean())
+        if self._salt_ema is None:
+            self._salt_ema = salt_activity_raw
+        else:
+            self._salt_ema += _SALT_EMA_ALPHA * (salt_activity_raw - self._salt_ema)
+        salt_activity = float(np.clip(self._salt_ema, 0.0, 1.0))
+
         # activity.food_supply/water_supply (schema "1.6"): the REAL
         # World.food_supply/water_supply this tick's food_proximity/
         # water_proximity were already scaled by above, passed straight
@@ -585,6 +811,10 @@ class Simulation:
         # full" here exactly as it always implicitly behaved.
         food_supply_out = float(np.clip(food_supply, 0.0, 1.0))
         water_supply_out = float(np.clip(water_supply, 0.0, 1.0))
+        # activity.salt_supply (schema "1.7"): same clean, zero-smoothing
+        # read as food_supply/water_supply above, for the same reason --
+        # see that comment.
+        salt_supply_out = float(np.clip(salt_supply, 0.0, 1.0))
 
         if activity_norm < 0.2:
             action = "frozen"
@@ -603,29 +833,60 @@ class Simulation:
         wobble = (1.0 - mood_level) * self._rng.normal(0, 25)
 
         # Chemotaxis-like steering bias toward whichever of FOOD_POSITION/
-        # WATER_POSITION is currently winning (higher proximity) -- see
-        # _FOOD_STEER_GAIN's comment. Ties (exact at spawn, where both
-        # landmarks sit at the same ~7.81-unit distance) favor food, an
-        # arbitrary but deterministic tie-break so the very first tick's
-        # bias doesn't depend on floating-point noise; whichever landmark
-        # the fly drifts toward first then stays strictly closer (its own
-        # proximity keeps rising as the other's falls), so it keeps
-        # winning on every subsequent tick -- no oscillation between the
-        # two once broken. target_bearing uses the same sin(heading)=dx,
-        # cos(heading)=dz convention the position update below moves in,
-        # via atan2(dx, dz) (not the more usual atan2(dz, dx)) so a
-        # heading exactly equal to this bearing walks straight at the
-        # target. steer is a signed nudge toward that bearing along the
-        # shorter arc (wrapped to [-180, 180)) and is added alongside,
-        # never instead of, the stochastic terms above.
-        target = FOOD_POSITION if food_proximity >= water_proximity else WATER_POSITION
+        # WATER_POSITION/SALT_POSITION is currently winning (highest
+        # proximity) -- see _FOOD_STEER_GAIN's comment. food/water share
+        # food_activity as their gating strength (same channel -- see
+        # WATER_POSITION's comment); salt uses its own salt_activity,
+        # since it is a genuinely separate real channel. Ties (exact at
+        # spawn, where all three landmarks sit at the same ~7.81-unit
+        # distance) favor food first, then water, an arbitrary but
+        # deterministic tie-break (max() with this candidate order) so the
+        # very first tick's bias doesn't depend on floating-point noise;
+        # whichever landmark the fly drifts toward first then stays
+        # strictly closer (its own proximity keeps rising as the others'
+        # fall), so it keeps winning on every subsequent tick -- no
+        # oscillation once broken. target_bearing uses the same
+        # sin(heading)=dx, cos(heading)=dz convention the position update
+        # below moves in, via atan2(dx, dz) (not the more usual
+        # atan2(dz, dx)) so a heading exactly equal to this bearing walks
+        # straight at the target. steer is a signed nudge toward that
+        # bearing along the shorter arc (wrapped to [-180, 180)) and is
+        # added alongside, never instead of, the stochastic terms above.
+        landmark_candidates = [
+            (food_proximity, FOOD_POSITION, food_activity),
+            (water_proximity, WATER_POSITION, food_activity),
+            (salt_proximity, SALT_POSITION, salt_activity),
+        ]
+        _, target, target_activity = max(landmark_candidates, key=lambda c: c[0])
         target_dx = target[0] - self._x
         target_dz = target[1] - self._z
         bearing_to_target = math.degrees(math.atan2(target_dx, target_dz)) % 360
         angular_diff = ((bearing_to_target - self._heading + 180) % 360) - 180
-        steer = angular_diff * _FOOD_STEER_GAIN * food_activity
+        steer = angular_diff * _FOOD_STEER_GAIN * target_activity
 
-        self._heading = (self._heading + self._rng.normal(2, 5) + wobble + steer) % 360
+        # Danger repulsion -- the mirror image of the attraction steer
+        # above: a signed nudge AWAY from the nearest danger's bearing
+        # (the shorter arc to the OPPOSITE bearing), gated by
+        # danger_proximity (computed above, alongside the motor boost),
+        # not an EMA'd activity -- there is no spike-derived "danger
+        # activity" signal here to gate by (dangers are a world/physics
+        # concept, not a neural one -- see the module comment), so this
+        # uses the same raw exponential proximity the motor boost already
+        # does. Added alongside, never instead of, the landmark-attraction
+        # steer above -- a fly can head toward food AND away from a
+        # nearby danger in the same tick, independent effects summed into
+        # one heading update, same principle as every other additive term
+        # here.
+        danger_steer = 0.0
+        if danger_positions:
+            nearest = min(danger_positions, key=lambda d: math.hypot(self._x - d[0], self._z - d[1]))
+            bearing_away_from_danger = math.degrees(
+                math.atan2(self._x - nearest[0], self._z - nearest[1])
+            ) % 360
+            danger_angular_diff = ((bearing_away_from_danger - self._heading + 180) % 360) - 180
+            danger_steer = danger_angular_diff * _DANGER_STEER_GAIN * danger_proximity
+
+        self._heading = (self._heading + self._rng.normal(2, 5) + wobble + steer + danger_steer) % 360
         speed = activity_norm
         if action == "flying":
             wing_state = "buzzing" if activity_norm > 0.85 else "raised"
@@ -652,6 +913,8 @@ class Simulation:
                 "food_activity": food_activity,
                 "food_supply": food_supply_out,
                 "water_supply": water_supply_out,
+                "salt_activity": salt_activity,
+                "salt_supply": salt_supply_out,
                 "sample_spikes": sample_spikes,
             },
             "motor_state": {
@@ -671,7 +934,25 @@ class Simulation:
             # server.py's _handle_client. Schema "1.4" requires this key
             # to be present on every tick regardless, so it defaults to
             # empty here rather than being conditionally omitted.
-            "world": {"other_flies": []},
+            #
+            # "clock"/"dangers" (schema "1.7") are likewise World-level
+            # concepts a standalone Simulation has no state for -- dangers
+            # defaults to the real empty list (same "standalone defaults
+            # to the no-op case" spirit danger_positions=None already
+            # follows above: no World, no dangers to report), and clock
+            # is still computed, from this Simulation's own real
+            # sim_time_ms against the module default cycle length (it has
+            # no adjustable World.cycle_length_s to read), so a standalone
+            # Simulation's tick is schema-valid on its own, same as every
+            # other field here.
+            "world": {
+                "other_flies": [],
+                "clock": {
+                    "time_of_day": (self.sim_time_ms / 1000.0 / _DEFAULT_CYCLE_LENGTH_S) % 1.0,
+                    "cycle_length_s": _DEFAULT_CYCLE_LENGTH_S,
+                },
+                "dangers": [],
+            },
         }
 
     def handle_control(self, message: dict) -> None:
@@ -747,8 +1028,35 @@ class World:
         # down to the next respawn).
         self.food_supply = 1.0
         self.water_supply = 1.0
+        self.salt_supply = 1.0
         self._food_respawn_ticks = 0
         self._water_respawn_ticks = 0
+        self._salt_respawn_ticks = 0
+        # User-adjustable day/night cycle length -- see _DEFAULT_CYCLE_
+        # LENGTH_S's own comment. Changed at runtime via handle_control's
+        # "set_cycle_length_s"; time_of_day itself is never separately
+        # counted (see clock_state()), so changing this takes effect
+        # immediately on the next tick, nothing to resync.
+        self.cycle_length_s = _DEFAULT_CYCLE_LENGTH_S
+
+    def clock_state(self) -> dict:
+        """Real day/night clock, derived from this World's own already-
+        authoritative elapsed sim time (see _DEFAULT_CYCLE_LENGTH_S's
+        comment) -- not a separately-advanced counter, so it can never
+        drift out of sync with the ticks actually run.
+        """
+        elapsed_s = self.flies[0].sim_time_ms / 1000.0
+        time_of_day = (elapsed_s / self.cycle_length_s) % 1.0
+        return {"time_of_day": time_of_day, "cycle_length_s": self.cycle_length_s}
+
+    def danger_positions(self) -> list[tuple[float, float]]:
+        """This tick's two real danger positions (see DANGER_ORBIT_*/
+        DANGER_PATROL_*/_orbit_position/_patrol_position) -- a pure
+        function of elapsed sim time, same "derived, not separately
+        counted" style as clock_state() above.
+        """
+        elapsed_s = self.flies[0].sim_time_ms / 1000.0
+        return [_orbit_position(elapsed_s), _patrol_position(elapsed_s)]
 
     def step(self) -> list[dict]:
         """Ticks every fly once, together. Two-pass, as README.md/the
@@ -778,6 +1086,12 @@ class World:
         # (not next tick), so depletion/respawn are visible in
         # food_activity as soon as they happen, not one tick late.
         self._advance_supply(snapshot)
+        # Computed once per tick, same elapsed-time basis clock_state()
+        # reads -- every fly senses the SAME two danger positions this
+        # tick, consistent with the two-pass "single, consistent
+        # world-state" principle this method's own docstring states for
+        # peer positions.
+        dangers = self.danger_positions()
         payloads = []
         for i, fly in enumerate(self.flies):
             peers = [pos for j, pos in enumerate(snapshot) if j != i]
@@ -785,23 +1099,31 @@ class World:
                 peer_positions=peers,
                 food_supply=self.food_supply,
                 water_supply=self.water_supply,
+                salt_supply=self.salt_supply,
+                danger_positions=dangers,
             ))
         self._apply_min_separation(payloads)
         self.latest_payloads = payloads
         return payloads
 
     def _advance_supply(self, snapshot: list[tuple[float, float]]) -> None:
-        """Advances both landmarks' supply by one tick -- deplete-while-
-        eating, floor at 0, cooldown, respawn to 1.0 (see
+        """Advances all three landmarks' supply by one tick -- deplete-
+        while-eating, floor at 0, cooldown, respawn to 1.0 (see
         _EATING_RANGE/_SUPPLY_CONSUMPTION_PER_TICK/_SUPPLY_RESPAWN_TICKS'
         comment). Runs once per World tick, same "shared resource state
         advanced once, here, not inside any one fly's own step()" pattern
         _apply_min_separation already established for fly-fly collision.
+        SALT_POSITION reuses this exact same generic depletion/respawn
+        mechanic -- _advance_one_supply already takes a landmark position
+        and the shared snapshot as plain arguments, nothing food-specific
+        baked in, so a third landmark needed no changes to it.
         """
         self.food_supply, self._food_respawn_ticks = self._advance_one_supply(
             self.food_supply, self._food_respawn_ticks, FOOD_POSITION, snapshot)
         self.water_supply, self._water_respawn_ticks = self._advance_one_supply(
             self.water_supply, self._water_respawn_ticks, WATER_POSITION, snapshot)
+        self.salt_supply, self._salt_respawn_ticks = self._advance_one_supply(
+            self.salt_supply, self._salt_respawn_ticks, SALT_POSITION, snapshot)
 
     @staticmethod
     def _advance_one_supply(
@@ -889,15 +1211,24 @@ class World:
             positions[i]["z"] = fly._z
 
     def handle_control(self, message: dict) -> None:
-        """Routes a connecting client's control message to the ONE fly it
-        controls (index 0) -- see N_FLIES' comment. Flies 1..N_FLIES-1
-        never receive control messages; their MoodControllers just
-        auto-ramp forever.
+        """Routes a connecting client's control message. "set_cycle_length_s"
+        is WORLD-level state (the one shared day/night clock, not any one
+        fly's own) so it's handled right here; everything else routes to
+        the ONE fly a client controls (index 0, see N_FLIES' comment) --
+        flies 1..N_FLIES-1 never receive control messages; their
+        MoodControllers just auto-ramp forever.
         """
+        if message.get("type") == "set_cycle_length_s":
+            try:
+                value = float(message["value"])
+            except (KeyError, TypeError, ValueError):
+                return
+            self.cycle_length_s = float(np.clip(value, _MIN_CYCLE_LENGTH_S, _MAX_CYCLE_LENGTH_S))
+            return
         self.flies[0].handle_control(message)
 
 
-def _build_client_payload(payloads: list[dict]) -> dict:
+def _build_client_payload(payloads: list[dict], world: World) -> dict:
     """Builds the tick a connecting client actually receives: fly 0's own
     full payload (stimulus/activity/motor_state/meta -- unchanged shape,
     see README.md's "minimize churn to the existing single-fly contract"),
@@ -905,10 +1236,21 @@ def _build_client_payload(payloads: list[dict]) -> dict:
     recent payloads -- id, position, heading_deg, action, wing_state only
     (see schema_v1.json's "world" definition -- a viewer isn't meant to
     have neural introspection into flies it doesn't control, just enough
-    to render them moving around realistically).
+    to render them moving around realistically) -- and `world.clock`/
+    `world.dangers` filled in from the World's own shared state (schema
+    "1.7"): clock_state() (time_of_day/cycle_length_s) and a minimal
+    renderable danger list (id/position only, same "just enough to render
+    it moving" spirit as other_flies -- a danger has no activity/stimulus
+    to omit in the first place).
     """
     payload = dict(payloads[0])
+    danger_positions = world.danger_positions()
     payload["world"] = {
+        "clock": world.clock_state(),
+        "dangers": [
+            {"id": i, "position": {"x": x, "z": z}}
+            for i, (x, z) in enumerate(danger_positions)
+        ],
         "other_flies": [
             {
                 "id": i,
@@ -966,7 +1308,7 @@ async def _handle_client(ws: ServerConnection, world: World) -> None:
         while True:
             payloads = world.latest_payloads
             if payloads is not None and payloads[0]["tick"] != last_tick_sent:
-                out = _build_client_payload(payloads)
+                out = _build_client_payload(payloads, world)
                 validate_tick(out)
                 await ws.send(json.dumps(out))
                 last_tick_sent = payloads[0]["tick"]
